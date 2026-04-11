@@ -13,6 +13,7 @@ Construction helpers:
 
 from __future__ import annotations
 from typing import Callable, Dict, List, Optional, Set, Tuple
+import os
 
 
 class TruthTable:
@@ -119,6 +120,144 @@ class TruthTable:
     ) -> TruthTable:
         """Construct from a plain dictionary."""
         return cls(n_inputs, input_names, output_names, rows, dont_cares)
+
+    @classmethod
+    def from_pla(
+        cls,
+        filepath: str,
+        input_names:  Optional[List[str]] = None,
+        output_names: Optional[List[str]] = None,
+    ) -> 'TruthTable':
+        """Load a truth table from a Berkeley PLA file on disk."""
+        with open(filepath, 'r') as fh:
+            content = fh.read()
+        return cls.from_pla_string(content, input_names, output_names)
+
+    @classmethod
+    def from_pla_string(
+        cls,
+        content: str,
+        input_names:  Optional[List[str]] = None,
+        output_names: Optional[List[str]] = None,
+    ) -> 'TruthTable':
+        """
+        Parse a Berkeley PLA string into a TruthTable.
+
+        Supported directives:
+          .i N      — number of inputs
+          .o M      — number of outputs
+          .ilb ...  — input variable names (space-separated)
+          .ob  ...  — output function names (space-separated)
+          .p  K     — product term count (informational, ignored)
+          .type X   — on-set type: 'f' (default), 'r', 'd', or combinations
+          .e / .end — end marker
+
+        Input cube characters:
+          '0' → bit is 0, '1' → bit is 1, '-' or '~' → wildcard
+
+        Output cube characters (per output column):
+          '1' → this implicant contributes to the output's on-set
+          '-' → output is don't-care for inputs covered by this cube
+          '0' → this implicant does NOT contribute (off-set or simply absent)
+
+        Type 'f' (most common, default):
+          Listed cubes define the ON-set.  Unlisted minterms → output 0.
+        Type 'r':
+          Listed cubes define the OFF-set.  Unlisted minterms → output 1.
+        """
+        n_inputs  = 0
+        n_outputs = 0
+        in_names:  Optional[List[str]] = input_names
+        out_names: Optional[List[str]] = output_names
+        pla_type  = 'f'
+
+        # per-output accumulation sets
+        on_bits: List[Set[int]]  = []   # on_bits[j]  = minterms where output j = 1
+        dc_bits: List[Set[int]]  = []   # dc_bits[j]  = minterms where output j = dc
+        def _init_sets(n: int) -> None:
+            nonlocal on_bits, dc_bits
+            on_bits  = [set() for _ in range(n)]
+            dc_bits  = [set() for _ in range(n)]
+
+        def _expand(pat: str) -> List[int]:
+            """Enumerate all minterms matched by an input cube pattern."""
+            acc = [0]
+            for ch in pat:
+                if ch == '1':
+                    acc = [(m << 1) | 1 for m in acc]
+                elif ch == '0':
+                    acc = [m << 1 for m in acc]
+                else:                        # '-' or '~'
+                    acc = [m << 1 for m in acc] + [(m << 1) | 1 for m in acc]
+            return acc
+
+        for raw in content.splitlines():
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                continue
+            tok = line.split()
+            key = tok[0].lower()
+
+            if key == '.i':
+                n_inputs = int(tok[1])
+            elif key == '.o':
+                n_outputs = int(tok[1])
+                _init_sets(n_outputs)
+            elif key == '.ilb':
+                in_names = tok[1:]
+            elif key in ('.ob', '.olb'):
+                out_names = tok[1:]
+            elif key == '.p':
+                pass
+            elif key == '.type':
+                pla_type = tok[1].lower() if len(tok) > 1 else 'f'
+            elif key in ('.e', '.end'):
+                break
+            elif not line.startswith('.'):
+                # product term row: "<input_pat> <output_pat>"
+                if len(tok) < 2:
+                    continue
+                inp_pat, out_pat = tok[0], tok[1]
+                if not on_bits:           # .o may come after first cube
+                    n_outputs = len(out_pat)
+                    _init_sets(n_outputs)
+                covered = _expand(inp_pat)
+                for j, ch in enumerate(out_pat):
+                    if ch == '1':
+                        on_bits[j].update(covered)
+                    elif ch == '-':
+                        dc_bits[j].update(covered)
+                    # '0' → intentionally not in on-set; nothing to record
+
+        # ── default names if absent ───────────────────────────────────────────
+        if not in_names:
+            in_names = [f'x{i}' for i in range(n_inputs)]
+        if not out_names:
+            out_names = [f'y{j}' for j in range(n_outputs)]
+
+        # ── invert sets for OFF-set type ──────────────────────────────────────
+        all_minterms: Set[int] = set(range(1 << n_inputs))
+        if 'r' in pla_type:
+            # listed cubes = off-set; on-set is the complement
+            for j in range(n_outputs):
+                on_bits[j] = all_minterms - on_bits[j] - dc_bits[j]
+
+        # ── global don't-care = minterms that are dc for EVERY output ─────────
+        if n_outputs > 0:
+            global_dc: Set[int] = set(dc_bits[0])
+            for j in range(1, n_outputs):
+                global_dc &= dc_bits[j]
+        else:
+            global_dc = set()
+
+        # ── build row dict ────────────────────────────────────────────────────
+        rows: Dict[int, Tuple[int, ...]] = {}
+        for m in all_minterms:
+            if m in global_dc:
+                continue
+            rows[m] = tuple(1 if m in on_bits[j] else 0 for j in range(n_outputs))
+
+        return cls(n_inputs, list(in_names), list(out_names), rows, global_dc)
 
     @classmethod
     def from_function(

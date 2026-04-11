@@ -18,8 +18,9 @@ Flags:
 
 import sys
 import os
+import argparse
 
-# ── Make imports work regardless of how the script is invoked ─────────────────
+# -- Make imports work regardless of how the script is invoked -----------------
 if __name__ == '__main__' and __package__ is None:
     _here = os.path.dirname(os.path.abspath(__file__))
     _root = os.path.dirname(_here)
@@ -69,40 +70,51 @@ def sanitize_for_logisim(label: str) -> str:
     return safe_name
 
 def main():
-    choice    = '7seg'
-    verbose   = True
-    circ_path = None
+    parser = argparse.ArgumentParser(description="Universal NAND Gate Optimizer")
+    parser.add_argument('circuit', nargs='?', default='all',
+                        help='Circuit to run: "all", a key (e.g. "7seg"), or a path to a .pla file')
+    parser.add_argument('-q', '--quiet', action='store_true',
+                        help='Suppress detailed optimization logs')
+    parser.add_argument('--circ', metavar='FILE',
+                        help='Export final network to Logisim Evolution (.circ) file')
+    args = parser.parse_args()
 
-    args = sys.argv[1:]
-    i = 0
-    while i < len(args):
-        if args[i] == '--quiet':
-            verbose = False
-        elif args[i] == '--circ' and i + 1 < len(args):
-            i += 1
-            circ_path = args[i]
-        elif not args[i].startswith('-'):
-            choice = args[i]
-        i += 1
+    target  = args.circuit
+    verbose = not args.quiet
 
-    if choice == 'all':
-        all_ok = True
-        for key in CIRCUITS:
-            path = None
-            if circ_path:
-                base, ext = os.path.splitext(circ_path)
-                path = f'{base}_{key}{ext}'
-            if not run_one(key, verbose, path):
-                all_ok = False
-        sys.exit(0 if all_ok else 1)
+    if target.endswith('.pla') or target.endswith('.espresso'):
+        from .truth_table import TruthTable
+        if not os.path.exists(target):
+            print(f"Error: PLA file '{target}' not found.")
+            sys.exit(1)
+        # We need run_pla logic here.
+        label = os.path.basename(target)
+        print(f'\n{"#" * 40}')
+        print(f'  {label}')
+        print(f'{"#" * 40}')
+        from .pipeline import optimize
+        tt     = TruthTable.from_pla(target)
+        result = optimize(tt, verbose=verbose)
+        from .tests import run_tests
+        ok     = run_tests(tt, result, verbose=verbose)
+        if args.circ:
+            from .circ_export import export_circ
+            export_circ(result, args.circ, sanitize_for_logisim(label))
+        sys.exit(0 if ok else 1)
 
-    if choice not in CIRCUITS:
-        print(f'Unknown circuit "{choice}".')
-        print(f'Available: {", ".join(CIRCUITS)} | all')
-        sys.exit(1)
+    if target == 'all':
+        ok = True
+        for key in CIRCUITS.keys():
+            if not run_one(key, verbose, args.circ):
+                ok = False
+        sys.exit(0 if ok else 1)
 
-    ok = run_one(choice, verbose, circ_path)
-    sys.exit(0 if ok else 1)
+    if target in CIRCUITS:
+        ok = run_one(target, verbose, args.circ)
+        sys.exit(0 if ok else 1)
+
+    print(f'\nUnknown circuit "{target}".\nAvailable: {", ".join(CIRCUITS.keys())} | all\n')
+    sys.exit(1)
 
 
 if __name__ == '__main__':

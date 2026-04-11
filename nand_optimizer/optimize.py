@@ -154,3 +154,84 @@ def elim_inv(expr: Expr) -> Expr:
     if isinstance(expr, Or):
         return simp(Or(*[elim_inv(a) for a in expr.args]))
     return expr
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Cross-output algebraic factorization  (2.2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _sop_terms(e: Expr) -> List[Expr]:
+    """Return top-level product terms of a SOP expression."""
+    return list(e.args) if isinstance(e, Or) else [e]
+
+
+def _factor_shared_lit(
+    expr:    Expr,
+    lit_key: Tuple[str, bool],
+) -> Expr:
+    """
+    If *lit_key* appears in ≥ 2 product terms of *expr*, factor it out.
+    x·a | x·b | c  →  x·(a | b) | c
+    """
+    if not isinstance(expr, Or):
+        return expr
+
+    terms     = expr.args
+    term_sets = [_term_lits(t) for t in terms]
+    idxs      = [i for i, ts in enumerate(term_sets) if lit_key in ts]
+
+    if len(idxs) < 2:
+        return expr
+
+    vname, neg     = lit_key
+    factor         = Lit(vname, neg)
+    remainders     = [_build_term(term_sets[i] - {lit_key}) for i in idxs]
+    remainder_sum  = remainders[0] if len(remainders) == 1 else Or(*remainders)
+    factored_part  = simp(And(factor, remainder_sum))
+    other          = [terms[i] for i in range(len(terms)) if i not in idxs]
+    if not other:
+        return factored_part
+    return simp(Or(factored_part, *other))
+
+
+def multi_output_factorize(exprs: List[Expr]) -> List[Expr]:
+    """
+    Cross-output algebraic factorization.
+
+    Scans the top-level product terms of every output expression to find
+    literals that appear in 2+ *different* outputs.  For each such shared
+    literal (processed highest-sharing first), every output that contains
+    it in ≥ 2 of its own terms has it factored out — the same heuristic as
+    factorize_once, but the decision to factor is driven by cross-output
+    frequency rather than intra-output repetition alone.
+
+    This exposes common And sub-trees so the AIG structurally hashes them
+    to a single shared gate regardless of which output originally introduced
+    the computation.
+    """
+    n = len(exprs)
+    if n <= 1:
+        return list(exprs)
+
+    # Collect per-literal occurrence counts across distinct outputs
+    lit_out_count: Dict[Tuple[str, bool], int] = {}
+    for expr in exprs:
+        present: Set[Tuple[str, bool]] = set()
+        for t in _sop_terms(expr):
+            present |= _term_lits(t)
+        for lit in present:
+            lit_out_count[lit] = lit_out_count.get(lit, 0) + 1
+
+    # Shared literals: present in 2+ different output expressions
+    shared = sorted(
+        (lit for lit, cnt in lit_out_count.items() if cnt > 1),
+        key=lambda lit: -lit_out_count[lit],   # most-shared first
+    )
+    if not shared:
+        return list(exprs)
+
+    result = list(exprs)
+    for lit_key in shared:
+        result = [_factor_shared_lit(e, lit_key) for e in result]
+
+    return result

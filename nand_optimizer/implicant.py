@@ -178,6 +178,103 @@ def espresso(ones: Set[int], dont_cares: Set[int],
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Multi-output cover selection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _select_cover_shared(
+    primes:    List[Implicant],
+    ones:      Set[int],
+    bits_freq: Dict[Tuple[int, ...], int],
+) -> List[Implicant]:
+    """
+    Cover selection that gives a tiebreak bonus to implicants whose bit
+    pattern is a prime implicant for more than one output.
+
+    Greedy key = (minterms_covered, is_shared_bonus, -literal_count)
+    """
+    if not ones:
+        return []
+
+    coverage: Dict[int, List[Implicant]] = {m: [] for m in ones}
+    for pi in primes:
+        for m in ones:
+            if m in pi.covered:
+                coverage[m].append(pi)
+
+    selected:  List[Implicant] = []
+    remaining: Set[int]        = set(ones)
+
+    # essential PIs
+    changed = True
+    while changed and remaining:
+        changed = False
+        for m in sorted(remaining):
+            avail = [pi for pi in coverage[m] if pi not in selected]
+            if len(avail) == 1:
+                pi = avail[0]
+                selected.append(pi)
+                remaining -= pi.covered & remaining
+                changed = True
+
+    # greedy cover – shared implicants preferred on equal coverage
+    while remaining:
+        best = max(
+            (pi for pi in primes if pi not in selected),
+            key=lambda pi: (
+                len(pi.covered & remaining),
+                1 if bits_freq.get(pi.bits, 1) > 1 else 0,
+                -pi.literal_count(),
+            ),
+            default=None,
+        )
+        if best is None:
+            break
+        selected.append(best)
+        remaining -= best.covered
+
+    return selected
+
+
+def multi_output_espresso(
+    ones_list:  List[Set[int]],
+    dont_cares: Set[int],
+    n_vars:     int,
+) -> List[List[Implicant]]:
+    """
+    Multi-output minimisation.
+
+    Generates prime implicants for every output simultaneously and selects
+    covers that prefer implicants shared across multiple outputs.  A prime
+    implicant bit-pattern that is valid for N > 1 outputs gets a tiebreak
+    bonus in each output's greedy cover step, so common product terms are
+    kept in the solution rather than replaced by output-specific alternatives.
+
+    Returns a list of per-output cover lists (same length as *ones_list*).
+    """
+    n = len(ones_list)
+    if n == 0:
+        return []
+    if n == 1:
+        return [espresso(ones_list[0], dont_cares, n_vars)]
+
+    primes_per: List[List[Implicant]] = [
+        quine_mccluskey(ones_list[i], dont_cares, n_vars)
+        for i in range(n)
+    ]
+
+    # Count in how many outputs each bit-pattern appears as a prime
+    bits_freq: Dict[Tuple[int, ...], int] = {}
+    for primes in primes_per:
+        for pi in primes:
+            bits_freq[pi.bits] = bits_freq.get(pi.bits, 0) + 1
+
+    return [
+        _select_cover_shared(primes_per[i], ones_list[i], bits_freq)
+        for i in range(n)
+    ]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Conversion helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 

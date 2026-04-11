@@ -16,9 +16,9 @@ from .nand        import NANDBuilder, eval_network, nand_gate_count
 from .pipeline    import OptimizeResult, OutputResult, _optimize_output
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 #  Test runner
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 
 class TestRunner:
     """Accumulates pass/fail counts and pretty-prints results."""
@@ -28,10 +28,10 @@ class TestRunner:
         self.failed = 0
 
     def ok(self, name: str, cond: bool, detail: str = ''):
-        sym = '✓' if cond else '✗'
+        sym = 'OK' if cond else 'FAIL'
         msg = f'  [{sym}] {name}'
         if detail:
-            msg += f'  →  {detail}'
+            msg += f'  ->  {detail}'
         print(msg)
         if cond:
             self.passed += 1
@@ -47,9 +47,9 @@ class TestRunner:
         return self.failed == 0
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 #  Generic tests
-# ═══════════════════════════════════════════════════════════════════════════════
+# -------------------------------------------------------------------------------
 
 def run_tests(tt: TruthTable, result: OptimizeResult,
               verbose: bool = True) -> bool:
@@ -62,12 +62,12 @@ def run_tests(tt: TruthTable, result: OptimizeResult,
     n_vars    = tt.n_inputs
     defined   = set(tt.rows.keys())
 
-    print('═' * 68)
+    print('-' * 68)
     print('UNIT TESTS')
-    print('═' * 68)
+    print('-' * 68)
 
-    # ── T1: QMC minimisation correctness ──────────────────────────────────
-    print(f'\n  ── T1: QMC minimisation {"─" * 40}')
+    # -- T1: QMC minimisation correctness ----------------------------------
+    print(f'\n  -- T1: QMC minimisation {"-" * 40}')
     for idx, name in enumerate(tt.output_names):
         ones = tt.ones(idx)
         dc   = tt.dont_cares
@@ -80,12 +80,12 @@ def run_tests(tt: TruthTable, result: OptimizeResult,
             exp = tt.rows[m][idx]
             got = expr.eval(asg)
             if got != exp:
-                errs.append(f'm{m}:exp{exp}≠got{got}')
+                errs.append(f'm{m}:exp{exp}!=got{got}')
         t.ok(f'QMC  {name}',
              not errs, '; '.join(errs) if errs else f'{len(imps)} implicants')
 
-    # ── T2: Phase assignment preserves truth values ───────────────────────
-    print(f'\n  ── T2: Phase assignment {"─" * 39}')
+    # -- T2: Phase assignment preserves truth values -----------------------
+    print(f'\n  -- T2: Phase assignment {"-" * 39}')
     for idx, name in enumerate(tt.output_names):
         ones = tt.ones(idx)
         dc   = tt.dont_cares
@@ -104,8 +104,8 @@ def run_tests(tt: TruthTable, result: OptimizeResult,
         t.ok(f'Phase({form}) {name}', not errs,
              '; '.join(errs) if errs else 'correct')
 
-    # ── T3: Factorization is truth-preserving ─────────────────────────────
-    print(f'\n  ── T3: Algebraic factorization {"─" * 32}')
+    # -- T3: Factorization is truth-preserving -----------------------------
+    print(f'\n  -- T3: Algebraic factorization {"-" * 32}')
     for idx, name in enumerate(tt.output_names):
         ones = tt.ones(idx)
         dc   = tt.dont_cares
@@ -119,11 +119,11 @@ def run_tests(tt: TruthTable, result: OptimizeResult,
             if expr.eval(asg) != fact.eval(asg):
                 errs.append(f'm{m}')
         d = fact.literals() - expr.literals()
-        t.ok(f'Factor {name} (Δ={d:+})', not errs,
+        t.ok(f'Factor {name} (delta={d:+})', not errs,
              '; '.join(errs) if errs else 'equivalent')
 
-    # ── T4: Shannon decomposition is truth-preserving ─────────────────────
-    print(f'\n  ── T4: Shannon decomposition {"─" * 33}')
+    # -- T4: Shannon decomposition is truth-preserving ---------------------
+    print(f'\n  -- T4: Shannon decomposition {"-" * 33}')
     for idx, name in enumerate(tt.output_names):
         ones = tt.ones(idx)
         dc   = tt.dont_cares
@@ -137,11 +137,11 @@ def run_tests(tt: TruthTable, result: OptimizeResult,
             if expr.eval(asg) != shan.eval(asg):
                 errs.append(f'm{m}')
         d = shan.literals() - expr.literals()
-        t.ok(f'Shannon {name} (Δ={d:+})', not errs,
+        t.ok(f'Shannon {name} (delta={d:+})', not errs,
              '; '.join(errs) if errs else 'equivalent')
 
-    # ── T5: Double-inversion elimination ──────────────────────────────────
-    print(f'\n  ── T5: Redundant inversion elimination {"─" * 24}')
+    # -- T5: Double-inversion elimination ----------------------------------
+    print(f'\n  -- T5: Redundant inversion elimination {"-" * 24}')
     cases = [
         ('~~a',    Not(Not(Lit('a'))),                'a'),
         ('~~~a',   Not(Not(Not(Lit('a')))),            '~a'),
@@ -152,8 +152,8 @@ def run_tests(tt: TruthTable, result: OptimizeResult,
         t.ok(f'elim_inv({label})', cleaned == expected,
              f'got "{cleaned}", want "{expected}"')
 
-    # ── T6: Implicant coverage ────────────────────────────────────────────
-    print(f'\n  ── T6: Implicant coverage {"─" * 36}')
+    # -- T6: Implicant coverage --------------------------------------------
+    print(f'\n  -- T6: Implicant coverage {"-" * 36}')
     for idx, name in enumerate(tt.output_names):
         ones = tt.ones(idx)
         dc   = tt.dont_cares
@@ -164,8 +164,8 @@ def run_tests(tt: TruthTable, result: OptimizeResult,
         t.ok(f'Coverage {name}', not uncovered,
              f'uncovered: {uncovered}' if uncovered else f'{len(imps)} PIs')
 
-    # ── T7: NAND network simulation ──────────────────────────────────────
-    print(f'\n  ── T7: NAND network simulation {"─" * 31}')
+    # -- T7: NAND network simulation --------------------------------------
+    print(f'\n  -- T7: NAND network simulation {"-" * 31}')
     for idx, name in enumerate(tt.output_names):
         r    = result[name]
         errs = []
@@ -175,13 +175,13 @@ def run_tests(tt: TruthTable, result: OptimizeResult,
             got  = eval_network(r.gates, inp)
             exp  = tt.rows[m][idx]
             if got != exp:
-                errs.append(f'm{m}:exp{exp}≠got{got}')
+                errs.append(f'm{m}:exp{exp}!=got{got}')
         t.ok(f'NAND sim {name} ({r.n_nand} gates)',
              not errs, '; '.join(errs) if errs else 'correct')
 
-    # ── T8: Don't-care robustness ─────────────────────────────────────────
+    # -- T8: Don't-care robustness -----------------------------------------
     if tt.dont_cares:
-        print(f'\n  ── T8: Don\'t-care robustness {"─" * 33}')
+        print(f'\n  -- T8: Don\'t-care robustness {"-" * 33}')
         crash = False
         for idx, name in enumerate(tt.output_names):
             r = result[name]
@@ -195,8 +195,8 @@ def run_tests(tt: TruthTable, result: OptimizeResult,
                 print(f'     CRASH {name}: {e}')
         t.ok('Don\'t-care eval (no crash)', not crash)
 
-    # ── T9: Full truth-table cross-check ──────────────────────────────────
-    print(f'\n  ── T9: Full truth-table cross-check {"─" * 26}')
+    # -- T9: Full truth-table cross-check ----------------------------------
+    print(f'\n  -- T9: Full truth-table cross-check {"-" * 26}')
     all_ok = True
     for m in sorted(defined):
         bits  = int_to_bits(m, n_vars)
@@ -213,11 +213,11 @@ def run_tests(tt: TruthTable, result: OptimizeResult,
         if row_ok and verbose:
             active = [n for i, n in enumerate(tt.output_names)
                       if tt.rows[m][i] == 1]
-            print(f'     Input {m}: {", ".join(active) if active else "(none)"} ON  ✓')
+            print(f'     Input {m}: {", ".join(active) if active else "(none)"} ON  OK')
     t.ok('Full truth-table', all_ok)
 
-    # ── T10: Greedy reassociation saves gates ─────────────────────────────
-    print(f'\n  ── T10: Greedy reassociation {"─" * 33}')
+    # -- T10: Greedy reassociation saves gates -----------------------------
+    print(f'\n  -- T10: Greedy reassociation {"-" * 33}')
 
     class _LeftFoldBuilder(NANDBuilder):
         def nand(self, *ins):
@@ -273,12 +273,12 @@ def run_tests(tt: TruthTable, result: OptimizeResult,
     t.ok(f'Greedy reassociation savings', saved >= 0,
          f'left-fold={cnt_lf}, greedy={cnt_gr}, saved={saved}')
 
-    # ── Summary ───────────────────────────────────────────────────────────
-    print('\n' + '═' * 68)
+    # -- Summary -----------------------------------------------------------
+    print('\n' + '-' * 68)
     print(f'  Results: {t.passed}/{t.total} passed', end='')
     if t.failed:
         print(f'  ({t.failed} FAILED)')
     else:
-        print('  — ALL TESTS PASSED ✓')
-    print('═' * 68)
+        print('  — ALL TESTS PASSED OK')
+    print('-' * 68)
     return t.all_passed

@@ -15,16 +15,32 @@ Pipeline:
 from .truth_table  import TruthTable
 from .pipeline     import optimize, OutputResult
 from .expr         import Expr, Const, Lit, Not, And, Or, ONE, ZERO, simp
-from .implicant    import Implicant, quine_mccluskey, espresso
-from .optimize     import phase_assign, factorize, apply_shannon, elim_inv
+from .implicant    import (Implicant, quine_mccluskey, espresso,
+                           multi_output_espresso)
+from .optimize     import (phase_assign, factorize, apply_shannon, elim_inv,
+                           multi_output_factorize)
+from .aig          import AIG
 from .nand         import NANDBuilder, Gate, eval_network, nand_gate_count
 from .circ_export  import export_circ
+from .verify       import miter_verify
+from .tests        import run_tests
 
 __all__ = [
+    # core pipeline
     'TruthTable', 'optimize', 'OutputResult',
+    # expression AST
     'Expr', 'Const', 'Lit', 'Not', 'And', 'Or', 'ONE', 'ZERO', 'simp',
-    'Implicant', 'quine_mccluskey', 'espresso',
+    # logic minimisation
+    'Implicant', 'quine_mccluskey', 'espresso', 'multi_output_espresso',
+    # optimisation passes
     'phase_assign', 'factorize', 'apply_shannon', 'elim_inv',
-    'NANDBuilder', 'Gate', 'eval_network', 'nand_gate_count',
+    'multi_output_factorize',
+    # gate network
+    'AIG', 'NANDBuilder', 'Gate', 'eval_network', 'nand_gate_count',
+    # export
     'export_circ',
+    # verification
+    'miter_verify',
+    # test suites
+    'run_tests', 'run_benchmarks',
 ]
