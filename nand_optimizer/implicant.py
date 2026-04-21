@@ -1,79 +1,130 @@
 """
 Quine-McCluskey prime implicant generation and minimum cover selection.
 
-Works with any number of variables — the bit width is inferred
-from the Implicant.bits tuple length.
+All operations work directly on cube covers — ternary arrays where each
+position holds 0, 1, or DASH (= -1, "don't care").  No 2^N minterm
+expansion is ever required.
+
+Primary entry points:
+  quine_mccluskey(on_cubes, dc_cubes, n_vars) -> List[Implicant]
+  select_cover(primes, on_cubes)              -> List[Implicant]
+  espresso(on_cubes, dc_cubes, n_vars)        -> List[Implicant]
+  multi_output_espresso(on_cubes_list, dc_cubes, n_vars)
+
+Utilities:
+  int_to_bits(n, width)               -> Tuple[int, ...]
+  _expand_cubes_to_set(cubes, n_vars) -> Set[int]   (small n only)
+  _int_set_to_cubes(ints, n_vars)     -> List[Tuple]
 """
 
 from __future__ import annotations
-from typing import Dict, FrozenSet, List, Set, Tuple
+from collections import defaultdict
+from typing import Dict, List, Set, Tuple
 
 from .expr import Expr, Lit, And, Or, ZERO, ONE
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Helpers
-# ═══════════════════════════════════════════════════════════════════════════════
+DASH = -1  # wildcard / don't-care position in a ternary cube
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Utilities
+# ─────────────────────────────────────────────────────────────────────────────
 
 def int_to_bits(n: int, width: int) -> Tuple[int, ...]:
-    """Convert integer to tuple of bits (MSB first)."""
+    """Convert integer to MSB-first bit tuple."""
     return tuple((n >> (width - 1 - i)) & 1 for i in range(width))
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+def _expand_cubes_to_set(cubes: List[Tuple[int, ...]], n_vars: int) -> Set[int]:
+    """Expand ternary cubes to the set of minterm integers they cover.
+
+    Only call for small n (n <= 20); for large n the result is exponential.
+    """
+    result: Set[int] = set()
+    for cube in cubes:
+        minterms = [0]
+        for i, b in enumerate(cube):        # i=0 is MSB
+            bit_pos = n_vars - 1 - i
+            if b == DASH:
+                minterms = minterms + [m | (1 << bit_pos) for m in minterms]
+            elif b == 1:
+                minterms = [m | (1 << bit_pos) for m in minterms]
+            # b == 0: bit stays 0
+        result.update(minterms)
+    return result
+
+
+def _int_set_to_cubes(ints: Set[int], n_vars: int) -> List[Tuple[int, ...]]:
+    """Convert a set of minterm integers to unit (no-DASH) cubes."""
+    return [int_to_bits(m, n_vars) for m in sorted(ints)]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Implicant
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 
 class Implicant:
     """
-    A product term / prime implicant.
+    A product term / prime implicant as a ternary cube.
 
-    bits[i] ∈ {0, 1, DASH}  where DASH means "don't care at position i".
-    covered = frozenset of original minterms subsumed by this implicant.
+    bits[i] in {0, 1, DASH}  where DASH = -1 means "don't care at position i".
     """
-    DASH = -1
+    DASH = DASH
 
-    def __init__(self, bits: Tuple[int, ...], covered: FrozenSet[int]):
-        self.bits    = bits
-        self.covered = covered
+    __slots__ = ('bits',)
+
+    def __init__(self, bits: Tuple[int, ...]):
+        self.bits = bits
 
     # ── properties ────────────────────────────────────────────────────────────
 
     def literal_count(self) -> int:
-        return sum(1 for b in self.bits if b != self.DASH)
+        return sum(1 for b in self.bits if b != DASH)
+
+    def subsumes(self, cube: Tuple[int, ...]) -> bool:
+        """True iff every minterm in *cube* is also covered by self.
+
+        Cube-subsumption: self covers cube iff for every position i,
+        self.bits[i] == DASH  or  self.bits[i] == cube[i].
+        """
+        return all(pb == DASH or pb == cb for pb, cb in zip(self.bits, cube))
 
     def covers_minterm(self, m: int) -> bool:
         mb = int_to_bits(m, len(self.bits))
-        return all(ib == self.DASH or ib == mb[i] for i, ib in enumerate(self.bits))
+        return all(ib == DASH or ib == mb[i] for i, ib in enumerate(self.bits))
 
     # ── combination ───────────────────────────────────────────────────────────
 
     def can_combine(self, other: Implicant) -> bool:
-        """Two implicants combine if DASH positions match and exactly one bit differs."""
+        """Combine if DASH positions match and exactly one non-DASH bit differs."""
         diffs = 0
         for a, b in zip(self.bits, other.bits):
-            if (a == self.DASH) != (b == self.DASH):
+            if (a == DASH) != (b == DASH):
                 return False
             if a != b:
                 diffs += 1
+                if diffs > 1:
+                    return False
         return diffs == 1
 
     def combine(self, other: Implicant) -> Implicant:
-        new = tuple(self.DASH if a != b else a for a, b in zip(self.bits, other.bits))
-        return Implicant(new, self.covered | other.covered)
+        return Implicant(
+            tuple(DASH if a != b else a for a, b in zip(self.bits, other.bits))
+        )
 
     # ── display ───────────────────────────────────────────────────────────────
 
     def to_term_str(self, var_names: List[str]) -> str:
         parts = [
             var_names[i] if b == 1 else f'~{var_names[i]}'
-            for i, b in enumerate(self.bits) if b != self.DASH
+            for i, b in enumerate(self.bits) if b != DASH
         ]
         return ' & '.join(parts) if parts else '1'
 
     def __repr__(self) -> str:
-        s = ''.join('-' if b == self.DASH else str(b) for b in self.bits)
-        return f'<{s} {{{",".join(str(c) for c in sorted(self.covered))}}}>'
+        s = ''.join('-' if b == DASH else str(b) for b in self.bits)
+        return f'<{s}>'
 
     def __eq__(self, other) -> bool:
         return isinstance(other, Implicant) and self.bits == other.bits
@@ -82,204 +133,228 @@ class Implicant:
         return hash(self.bits)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  QMC  →  prime implicants
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
+#  QMC → prime implicants
+# ─────────────────────────────────────────────────────────────────────────────
 
-def quine_mccluskey(ones: Set[int], dont_cares: Set[int],
-                    n_vars: int) -> List[Implicant]:
-    """Return all prime implicants for (ones ∪ dont_cares) over *n_vars* inputs."""
-    all_terms = ones | dont_cares
-    if not all_terms:
+def quine_mccluskey(
+    on_cubes: List[Tuple[int, ...]],
+    dc_cubes: List[Tuple[int, ...]],
+    n_vars:   int,
+) -> List[Implicant]:
+    """Return all prime implicants for (on_cubes ∪ dc_cubes).
+
+    Operates directly on ternary cubes — no 2^N expansion needed.
+    Two cubes combine iff their DASH masks are identical and they differ
+    in exactly one non-DASH bit; that bit becomes DASH in the merged cube.
+    Grouping by "count of explicit 1-bits" ensures all valid pairs are tried
+    in adjacent groups (changing one 0→1 shifts ones_count by exactly 1).
+    """
+    all_cubes: Dict[Tuple[int, ...], Implicant] = {}
+    for c in on_cubes + dc_cubes:
+        all_cubes[c] = Implicant(c)
+
+    if not all_cubes:
         return []
 
-    current: List[Implicant] = [
-        Implicant(int_to_bits(m, n_vars), frozenset({m}))
-        for m in sorted(all_terms)
-    ]
-    primes: Set[Implicant] = set()
+    def ones_count(bits: Tuple[int, ...]) -> int:
+        return sum(1 for b in bits if b == 1)
+
+    current = dict(all_cubes)
+    primes: Dict[Tuple[int, ...], Implicant] = {}
 
     while current:
-        combined: List[Implicant] = []
-        used: Set[int] = set()
+        groups: Dict[int, List[Implicant]] = defaultdict(list)
+        for imp in current.values():
+            groups[ones_count(imp.bits)].append(imp)
 
-        for i in range(len(current)):
-            for j in range(i + 1, len(current)):
-                if current[i].can_combine(current[j]):
-                    merged = current[i].combine(current[j])
-                    if merged not in combined:
-                        combined.append(merged)
-                    used.add(i)
-                    used.add(j)
+        used: Set[Tuple[int, ...]] = set()
+        next_level: Dict[Tuple[int, ...], Implicant] = {}
 
-        for i, imp in enumerate(current):
-            if i not in used:
-                primes.add(imp)
+        for k in sorted(groups):
+            if k + 1 not in groups:
+                continue
+            for a in groups[k]:
+                for b in groups[k + 1]:
+                    if a.can_combine(b):
+                        merged = a.combine(b)
+                        used.add(a.bits)
+                        used.add(b.bits)
+                        next_level[merged.bits] = merged
 
-        current = combined
+        for bits, imp in current.items():
+            if bits not in used:
+                primes[bits] = imp
 
-    return sorted(primes, key=lambda p: p.bits)
+        current = next_level
+
+    return sorted(primes.values(), key=lambda p: p.bits)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 #  Cover selection  (essential PIs + greedy)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 
-def select_cover(primes: List[Implicant], ones: Set[int]) -> List[Implicant]:
-    """
-    Select a minimal cover:
-      1. Find essential prime implicants (only PI covering a minterm).
-      2. Greedily cover remaining minterms (most coverage, fewest literals).
-    """
-    if not ones:
-        return []
-
-    coverage: Dict[int, List[Implicant]] = {m: [] for m in ones}
-    for pi in primes:
-        for m in ones:
-            if m in pi.covered:
-                coverage[m].append(pi)
-
-    selected:  List[Implicant] = []
-    remaining: Set[int]        = set(ones)
-
-    # essential PIs
-    changed = True
-    while changed and remaining:
-        changed = False
-        for m in sorted(remaining):
-            avail = [pi for pi in coverage[m] if pi not in selected]
-            if len(avail) == 1:
-                pi = avail[0]
-                selected.append(pi)
-                remaining -= pi.covered & remaining
-                changed = True
-
-    # greedy cover
-    while remaining:
-        best = max(
-            (pi for pi in primes if pi not in selected),
-            key=lambda pi: (len(pi.covered & remaining), -pi.literal_count()),
-            default=None,
-        )
-        if best is None:
-            break
-        selected.append(best)
-        remaining -= best.covered
-
-    return selected
-
-
-def espresso(ones: Set[int], dont_cares: Set[int],
-             n_vars: int) -> List[Implicant]:
-    """Full QMC minimisation: prime generation + cover selection."""
-    primes = quine_mccluskey(ones, dont_cares, n_vars)
-    return select_cover(primes, ones)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Multi-output cover selection
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _select_cover_shared(
-    primes:    List[Implicant],
-    ones:      Set[int],
-    bits_freq: Dict[Tuple[int, ...], int],
+def select_cover(
+    primes:   List[Implicant],
+    on_cubes: List[Tuple[int, ...]],
 ) -> List[Implicant]:
-    """
-    Cover selection that gives a tiebreak bonus to implicants whose bit
-    pattern is a prime implicant for more than one output.
+    """Select a minimal cover of on_cubes using prime implicants.
 
-    Greedy key = (minterms_covered, is_shared_bonus, -literal_count)
+    Coverage via cube subsumption: prime P covers on_cube C iff P.subsumes(C),
+    i.e. every minterm in C is also in P.  No minterm enumeration needed.
+
+    1. Essential PIs: unique prime subsuming some on_cube.
+    2. Greedy: most remaining on_cubes covered, then fewest literals.
     """
-    if not ones:
+    if not on_cubes:
         return []
 
-    coverage: Dict[int, List[Implicant]] = {m: [] for m in ones}
-    for pi in primes:
-        for m in ones:
-            if m in pi.covered:
-                coverage[m].append(pi)
+    coverage: List[List[int]] = [
+        [j for j, p in enumerate(primes) if p.subsumes(on_cubes[i])]
+        for i in range(len(on_cubes))
+    ]
 
-    selected:  List[Implicant] = []
-    remaining: Set[int]        = set(ones)
+    selected: List[Implicant] = []
+    sel_set:  Set[int]         = set()
+    uncov:    Set[int]         = set(range(len(on_cubes)))
 
-    # essential PIs
+    # 1. Essential PIs
     changed = True
-    while changed and remaining:
+    while changed and uncov:
         changed = False
-        for m in sorted(remaining):
-            avail = [pi for pi in coverage[m] if pi not in selected]
+        for i in list(uncov):
+            avail = [j for j in coverage[i] if j not in sel_set]
             if len(avail) == 1:
-                pi = avail[0]
-                selected.append(pi)
-                remaining -= pi.covered & remaining
+                j = avail[0]
+                selected.append(primes[j])
+                sel_set.add(j)
+                for k in list(uncov):
+                    if primes[j].subsumes(on_cubes[k]):
+                        uncov.discard(k)
                 changed = True
 
-    # greedy cover – shared implicants preferred on equal coverage
-    while remaining:
+    # 2. Greedy cover
+    while uncov:
         best = max(
-            (pi for pi in primes if pi not in selected),
-            key=lambda pi: (
-                len(pi.covered & remaining),
-                1 if bits_freq.get(pi.bits, 1) > 1 else 0,
-                -pi.literal_count(),
+            (j for j in range(len(primes)) if j not in sel_set),
+            key=lambda j: (
+                sum(1 for k in uncov if primes[j].subsumes(on_cubes[k])),
+                -primes[j].literal_count(),
             ),
             default=None,
         )
         if best is None:
             break
-        selected.append(best)
-        remaining -= best.covered
+        selected.append(primes[best])
+        sel_set.add(best)
+        for k in list(uncov):
+            if primes[best].subsumes(on_cubes[k]):
+                uncov.discard(k)
+
+    return selected
+
+
+def espresso(
+    on_cubes: List[Tuple[int, ...]],
+    dc_cubes: List[Tuple[int, ...]],
+    n_vars:   int,
+) -> List[Implicant]:
+    """Full QMC minimisation: prime generation + cover selection."""
+    primes = quine_mccluskey(on_cubes, dc_cubes, n_vars)
+    return select_cover(primes, on_cubes)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Multi-output cover selection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _select_cover_shared(
+    primes:    List[Implicant],
+    on_cubes:  List[Tuple[int, ...]],
+    bits_freq: Dict[Tuple[int, ...], int],
+) -> List[Implicant]:
+    """Cover selection with tiebreak bonus for primes shared across outputs."""
+    if not on_cubes:
+        return []
+
+    coverage: List[List[int]] = [
+        [j for j, p in enumerate(primes) if p.subsumes(on_cubes[i])]
+        for i in range(len(on_cubes))
+    ]
+
+    selected: List[Implicant] = []
+    sel_set:  Set[int]         = set()
+    uncov:    Set[int]         = set(range(len(on_cubes)))
+
+    changed = True
+    while changed and uncov:
+        changed = False
+        for i in list(uncov):
+            avail = [j for j in coverage[i] if j not in sel_set]
+            if len(avail) == 1:
+                j = avail[0]
+                selected.append(primes[j])
+                sel_set.add(j)
+                for k in list(uncov):
+                    if primes[j].subsumes(on_cubes[k]):
+                        uncov.discard(k)
+                changed = True
+
+    while uncov:
+        best = max(
+            (j for j in range(len(primes)) if j not in sel_set),
+            key=lambda j: (
+                sum(1 for k in uncov if primes[j].subsumes(on_cubes[k])),
+                1 if bits_freq.get(primes[j].bits, 1) > 1 else 0,
+                -primes[j].literal_count(),
+            ),
+            default=None,
+        )
+        if best is None:
+            break
+        selected.append(primes[best])
+        sel_set.add(best)
+        for k in list(uncov):
+            if primes[best].subsumes(on_cubes[k]):
+                uncov.discard(k)
 
     return selected
 
 
 def multi_output_espresso(
-    ones_list:  List[Set[int]],
-    dont_cares: Set[int],
-    n_vars:     int,
+    on_cubes_list: List[List[Tuple[int, ...]]],
+    dc_cubes:      List[Tuple[int, ...]],
+    n_vars:        int,
 ) -> List[List[Implicant]]:
-    """
-    Multi-output minimisation.
-
-    Generates prime implicants for every output simultaneously and selects
-    covers that prefer implicants shared across multiple outputs.  A prime
-    implicant bit-pattern that is valid for N > 1 outputs gets a tiebreak
-    bonus in each output's greedy cover step, so common product terms are
-    kept in the solution rather than replaced by output-specific alternatives.
-
-    Returns a list of per-output cover lists (same length as *ones_list*).
-    """
-    n = len(ones_list)
+    """Multi-output minimisation with shared prime implicant preference."""
+    n = len(on_cubes_list)
     if n == 0:
         return []
     if n == 1:
-        return [espresso(ones_list[0], dont_cares, n_vars)]
+        return [espresso(on_cubes_list[0], dc_cubes, n_vars)]
 
     primes_per: List[List[Implicant]] = [
-        quine_mccluskey(ones_list[i], dont_cares, n_vars)
+        quine_mccluskey(on_cubes_list[i], dc_cubes, n_vars)
         for i in range(n)
     ]
 
-    # Count in how many outputs each bit-pattern appears as a prime
     bits_freq: Dict[Tuple[int, ...], int] = {}
     for primes in primes_per:
         for pi in primes:
             bits_freq[pi.bits] = bits_freq.get(pi.bits, 0) + 1
 
     return [
-        _select_cover_shared(primes_per[i], ones_list[i], bits_freq)
+        _select_cover_shared(primes_per[i], on_cubes_list[i], bits_freq)
         for i in range(n)
     ]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 #  Conversion helpers
-# ═══════════════════════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────────────────────
 
-def implicants_to_expr(imps: List[Implicant],
-                       var_names: List[str]) -> Expr:
+def implicants_to_expr(imps: List[Implicant], var_names: List[str]) -> Expr:
     """Convert a list of prime implicants to a SOP Expr tree."""
     if not imps:
         return ZERO
@@ -287,7 +362,7 @@ def implicants_to_expr(imps: List[Implicant],
     for imp in imps:
         lits = [
             Lit(var_names[i], b == 0)
-            for i, b in enumerate(imp.bits) if b != Implicant.DASH
+            for i, b in enumerate(imp.bits) if b != DASH
         ]
         if not lits:
             terms.append(ONE)

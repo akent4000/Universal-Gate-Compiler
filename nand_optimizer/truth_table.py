@@ -1,19 +1,45 @@
 """
 Generic truth table for combinational logic.
 
-A TruthTable describes an N-input, M-output logic function with
-optional don't-care rows.  It is the single input to the optimiser
-pipeline, so any combinational circuit can be optimised just by
-constructing the right TruthTable.
+Primary storage is a *cube cover*: a list of (input_cube, output_vals) pairs
+where each input_cube is a ternary tuple (0 / 1 / DASH=-1) of length n_inputs
+and output_vals is a 0/1 tuple of length n_outputs.
+
+For backward compatibility, the integer-keyed `rows` dict and `dont_cares` set
+are also populated when n_inputs <= 20 (so tests and verification code that
+iterate over minterms still work).
 
 Construction helpers:
-  • from_dict     — { input_int: (out0, out1, …), … }
-  • from_function — f(input_bits) → output_bits
+  from_dict     — { input_int: (out0, out1, ...), ... }
+  from_function — f(input_bits) -> output_bits
+  from_pla      — Berkeley PLA file path
+  from_pla_string — PLA content string
 """
 
 from __future__ import annotations
 from typing import Callable, Dict, List, Optional, Set, Tuple
 import os
+
+DASH = -1   # don't-care position in a ternary input cube
+
+# Maximum n for which minterms are expanded into rows (backward compat).
+_MAX_EXPAND_N = 20
+
+
+def _int_to_bits(n: int, width: int) -> Tuple[int, ...]:
+    return tuple((n >> (width - 1 - i)) & 1 for i in range(width))
+
+
+def _expand_cube_to_ints(cube: Tuple[int, ...], n_vars: int) -> List[int]:
+    """Enumerate all minterm integers covered by a ternary cube."""
+    minterms = [0]
+    for i, b in enumerate(cube):
+        bit_pos = n_vars - 1 - i
+        if b == DASH:
+            minterms = minterms + [m | (1 << bit_pos) for m in minterms]
+        elif b == 1:
+            minterms = [m | (1 << bit_pos) for m in minterms]
+    return minterms
 
 
 class TruthTable:
@@ -23,15 +49,19 @@ class TruthTable:
     n_inputs : int
         Number of input variables.
     input_names : list[str]
-        Names for input variables (MSB first).  len == n_inputs.
+        Names for input variables (MSB first).
     output_names : list[str]
         Names for output functions.
-    rows : dict[int, tuple[int, ...]]
-        Mapping minterm-index → output values.
-        Each value tuple has len == len(output_names).
-        Minterms not present (and not in *dont_cares*) default to 0.
+    cube_cover : list of (input_cube, output_vals)
+        Primary representation.  input_cube is a ternary Tuple[int,...] of
+        length n_inputs (values 0, 1, or DASH=-1).  output_vals is a
+        Tuple[int,...] of 0/1 values of length n_outputs.
+        Only on-set entries are stored; unlisted inputs default to output 0.
+    dc_cube_list : list of input cubes that are global don't-cares.
+    rows : dict[int, tuple]
+        Minterm-keyed output values (backward compat; populated for n<=20).
     dont_cares : set[int]
-        Input combinations whose output is don't-care.
+        Don't-care minterm indices (backward compat; populated for n<=20).
     """
 
     def __init__(
@@ -39,20 +69,18 @@ class TruthTable:
         n_inputs:     int,
         input_names:  List[str],
         output_names: List[str],
-        rows:         Dict[int, Tuple[int, ...]],
+        cube_cover:   List[Tuple[Tuple[int, ...], Tuple[int, ...]]],
+        dc_cube_list: Optional[List[Tuple[int, ...]]] = None,
+        rows:         Optional[Dict[int, Tuple[int, ...]]] = None,
         dont_cares:   Optional[Set[int]] = None,
     ):
         assert len(input_names) == n_inputs
-        width = len(output_names)
-        for m, vals in rows.items():
-            assert len(vals) == width, \
-                f'Row {m}: expected {width} outputs, got {len(vals)}'
-            assert 0 <= m < (1 << n_inputs), f'Minterm {m} out of range'
-
         self.n_inputs     = n_inputs
         self.input_names  = list(input_names)
         self.output_names = list(output_names)
-        self.rows         = dict(rows)
+        self.cube_cover   = list(cube_cover)
+        self.dc_cube_list = list(dc_cube_list) if dc_cube_list else []
+        self.rows         = dict(rows) if rows else {}
         self.dont_cares   = set(dont_cares) if dont_cares else set()
 
     # ── per-output helpers ────────────────────────────────────────────────────
@@ -61,14 +89,29 @@ class TruthTable:
     def n_outputs(self) -> int:
         return len(self.output_names)
 
+    def ones_cubes(self, output_idx: int) -> List[Tuple[int, ...]]:
+        """Input cubes where output *output_idx* is 1."""
+        return [cube for cube, vals in self.cube_cover if vals[output_idx] == 1]
+
+    @property
+    def dc_cubes(self) -> List[Tuple[int, ...]]:
+        """Global don't-care input cubes."""
+        return list(self.dc_cube_list)
+
     def ones(self, output_idx: int) -> Set[int]:
-        """Minterms where output *output_idx* is 1."""
-        return {m for m, v in self.rows.items() if v[output_idx] == 1}
+        """Minterms where output *output_idx* is 1 (backward compat)."""
+        if self.rows:
+            return {m for m, v in self.rows.items() if v[output_idx] == 1}
+        if self.n_inputs > _MAX_EXPAND_N:
+            return set()
+        from .implicant import _expand_cubes_to_set
+        return _expand_cubes_to_set(self.ones_cubes(output_idx), self.n_inputs)
 
     def zeros(self, output_idx: int) -> Set[int]:
-        """Minterms where output *output_idx* is 0."""
-        all_defined = set(self.rows.keys())
-        return {m for m in all_defined if self.rows[m][output_idx] == 0}
+        """Minterms where output *output_idx* is 0 (backward compat)."""
+        if self.rows:
+            return {m for m, v in self.rows.items() if v[output_idx] == 0}
+        return set()
 
     def expected(self, minterm: int, output_idx: int) -> Optional[int]:
         """Return expected value, or None if don't-care / undefined."""
@@ -76,12 +119,15 @@ class TruthTable:
             return None
         row = self.rows.get(minterm)
         if row is None:
-            return 0   # undefined → 0 by default
+            return 0
         return row[output_idx]
 
     # ── pretty print ──────────────────────────────────────────────────────────
 
     def __str__(self) -> str:
+        if self.n_inputs > _MAX_EXPAND_N:
+            return (f'TruthTable({self.n_inputs} inputs, {self.n_outputs} outputs, '
+                    f'{len(self.cube_cover)} cubes — too large to display)')
         hdr_in  = ' '.join(f'{n:>3}' for n in self.input_names)
         hdr_out = ' '.join(f'{n:>3}' for n in self.output_names)
         lines   = [f'  {"#":>3}  {hdr_in} | {hdr_out}']
@@ -97,15 +143,15 @@ class TruthTable:
             elif m in self.rows:
                 vals = '  '.join(str(v) for v in self.rows[m])
             else:
-                continue  # skip absent rows
+                continue
             lines.append(f'  {m:>3}  {bits} | {vals}')
         return '\n'.join(lines)
 
     def __repr__(self) -> str:
         return (f'TruthTable({self.n_inputs} inputs, '
                 f'{self.n_outputs} outputs, '
-                f'{len(self.rows)} rows, '
-                f'{len(self.dont_cares)} don\'t-cares)')
+                f'{len(self.cube_cover)} on-cubes, '
+                f'{len(self.dc_cube_list)} dc-cubes)')
 
     # ── factory helpers ───────────────────────────────────────────────────────
 
@@ -117,9 +163,18 @@ class TruthTable:
         output_names: List[str],
         rows:         Dict[int, Tuple[int, ...]],
         dont_cares:   Optional[Set[int]] = None,
-    ) -> TruthTable:
-        """Construct from a plain dictionary."""
-        return cls(n_inputs, input_names, output_names, rows, dont_cares)
+    ) -> 'TruthTable':
+        """Construct from a plain minterm dictionary."""
+        dc = set(dont_cares) if dont_cares else set()
+        # Build cube_cover: one unit cube per minterm
+        cube_cover = [
+            (_int_to_bits(m, n_inputs), vals)
+            for m, vals in sorted(rows.items())
+            if m not in dc
+        ]
+        dc_cube_list = [_int_to_bits(m, n_inputs) for m in sorted(dc)]
+        return cls(n_inputs, input_names, output_names,
+                   cube_cover, dc_cube_list, rows, dc)
 
     @classmethod
     def from_pla(
@@ -143,27 +198,20 @@ class TruthTable:
         """
         Parse a Berkeley PLA string into a TruthTable.
 
+        Cubes are stored directly — no 2^N minterm expansion.
+        The integer-keyed `rows` dict is populated only when n_inputs <= 20.
+
         Supported directives:
           .i N      — number of inputs
           .o M      — number of outputs
-          .ilb ...  — input variable names (space-separated)
-          .ob  ...  — output function names (space-separated)
-          .p  K     — product term count (informational, ignored)
-          .type X   — on-set type: 'f' (default), 'r', 'd', or combinations
+          .ilb ...  — input variable names
+          .ob  ...  — output function names
+          .p  K     — product term count (ignored)
+          .type X   — on-set type: 'f' (default) or 'r'
           .e / .end — end marker
 
-        Input cube characters:
-          '0' → bit is 0, '1' → bit is 1, '-' or '~' → wildcard
-
-        Output cube characters (per output column):
-          '1' → this implicant contributes to the output's on-set
-          '-' → output is don't-care for inputs covered by this cube
-          '0' → this implicant does NOT contribute (off-set or simply absent)
-
-        Type 'f' (most common, default):
-          Listed cubes define the ON-set.  Unlisted minterms → output 0.
-        Type 'r':
-          Listed cubes define the OFF-set.  Unlisted minterms → output 1.
+        Input cube characters:  '0' -> 0,  '1' -> 1,  '-'/'~' -> DASH
+        Output cube characters: '1' -> on-set,  '-' -> dc,  '0' -> off-set
         """
         n_inputs  = 0
         n_outputs = 0
@@ -171,25 +219,7 @@ class TruthTable:
         out_names: Optional[List[str]] = output_names
         pla_type  = 'f'
 
-        # per-output accumulation sets
-        on_bits: List[Set[int]]  = []   # on_bits[j]  = minterms where output j = 1
-        dc_bits: List[Set[int]]  = []   # dc_bits[j]  = minterms where output j = dc
-        def _init_sets(n: int) -> None:
-            nonlocal on_bits, dc_bits
-            on_bits  = [set() for _ in range(n)]
-            dc_bits  = [set() for _ in range(n)]
-
-        def _expand(pat: str) -> List[int]:
-            """Enumerate all minterms matched by an input cube pattern."""
-            acc = [0]
-            for ch in pat:
-                if ch == '1':
-                    acc = [(m << 1) | 1 for m in acc]
-                elif ch == '0':
-                    acc = [m << 1 for m in acc]
-                else:                        # '-' or '~'
-                    acc = [m << 1 for m in acc] + [(m << 1) | 1 for m in acc]
-            return acc
+        raw_cubes: List[Tuple[str, str]] = []   # (inp_pat, out_pat)
 
         for raw in content.splitlines():
             line = raw.strip()
@@ -202,7 +232,6 @@ class TruthTable:
                 n_inputs = int(tok[1])
             elif key == '.o':
                 n_outputs = int(tok[1])
-                _init_sets(n_outputs)
             elif key == '.ilb':
                 in_names = tok[1:]
             elif key in ('.ob', '.olb'):
@@ -214,50 +243,93 @@ class TruthTable:
             elif key in ('.e', '.end'):
                 break
             elif not line.startswith('.'):
-                # product term row: "<input_pat> <output_pat>"
                 if len(tok) < 2:
                     continue
-                inp_pat, out_pat = tok[0], tok[1]
-                if not on_bits:           # .o may come after first cube
-                    n_outputs = len(out_pat)
-                    _init_sets(n_outputs)
-                covered = _expand(inp_pat)
-                for j, ch in enumerate(out_pat):
-                    if ch == '1':
-                        on_bits[j].update(covered)
-                    elif ch == '-':
-                        dc_bits[j].update(covered)
-                    # '0' → intentionally not in on-set; nothing to record
+                if n_outputs == 0:
+                    n_outputs = len(tok[1])
+                raw_cubes.append((tok[0], tok[1]))
 
-        # ── default names if absent ───────────────────────────────────────────
         if not in_names:
             in_names = [f'x{i}' for i in range(n_inputs)]
         if not out_names:
             out_names = [f'y{j}' for j in range(n_outputs)]
 
-        # ── invert sets for OFF-set type ──────────────────────────────────────
-        all_minterms: Set[int] = set(range(1 << n_inputs))
+        # ── parse cubes into ternary representation ───────────────────────────
+        def _parse_in(pat: str) -> Tuple[int, ...]:
+            return tuple(0 if ch == '0' else 1 if ch == '1' else DASH
+                         for ch in pat)
+
+        cube_cover:   List[Tuple[Tuple[int, ...], Tuple[int, ...]]] = []
+        dc_cube_list: List[Tuple[int, ...]]                         = []
+
+        for inp_pat, out_pat in raw_cubes:
+            input_cube = _parse_in(inp_pat)
+            if all(ch == '-' for ch in out_pat):
+                dc_cube_list.append(input_cube)
+            else:
+                output_vals = tuple(1 if ch == '1' else 0 for ch in out_pat)
+                cube_cover.append((input_cube, output_vals))
+
+        # ── handle 'r' (off-set) type ─────────────────────────────────────────
         if 'r' in pla_type:
-            # listed cubes = off-set; on-set is the complement
-            for j in range(n_outputs):
-                on_bits[j] = all_minterms - on_bits[j] - dc_bits[j]
+            if n_inputs > _MAX_EXPAND_N:
+                raise ValueError(
+                    f"'r'-type PLA with {n_inputs} inputs > {_MAX_EXPAND_N} "
+                    "is not supported (would require cube complement)."
+                )
+            # Expand off-set cubes to minterms, compute complement
+            dc_set: Set[int] = set()
+            for cube in dc_cube_list:
+                for m in _expand_cube_to_ints(cube, n_inputs):
+                    dc_set.add(m)
 
-        # ── global don't-care = minterms that are dc for EVERY output ─────────
-        if n_outputs > 0:
-            global_dc: Set[int] = set(dc_bits[0])
-            for j in range(1, n_outputs):
-                global_dc &= dc_bits[j]
-        else:
-            global_dc = set()
+            off_per: List[Set[int]] = [set() for _ in range(n_outputs)]
+            for input_cube, output_vals in cube_cover:
+                for m in _expand_cube_to_ints(input_cube, n_inputs):
+                    for j, v in enumerate(output_vals):
+                        if v == 1:
+                            off_per[j].add(m)
 
-        # ── build row dict ────────────────────────────────────────────────────
-        rows: Dict[int, Tuple[int, ...]] = {}
-        for m in all_minterms:
-            if m in global_dc:
-                continue
-            rows[m] = tuple(1 if m in on_bits[j] else 0 for j in range(n_outputs))
+            all_m = set(range(1 << n_inputs))
+            on_per = [all_m - off_per[j] - dc_set for j in range(n_outputs)]
 
-        return cls(n_inputs, list(in_names), list(out_names), rows, global_dc)
+            all_on: Set[int] = set()
+            for s in on_per:
+                all_on |= s
+
+            cube_cover = []
+            for m in sorted(all_on - dc_set):
+                output_vals = tuple(1 if m in on_per[j] else 0
+                                    for j in range(n_outputs))
+                if any(v == 1 for v in output_vals):
+                    cube_cover.append((_int_to_bits(m, n_inputs), output_vals))
+
+            dc_cube_list = [_int_to_bits(m, n_inputs) for m in sorted(dc_set)]
+
+        # ── build rows / dont_cares for small n (backward compat) ────────────
+        rows:       Dict[int, Tuple[int, ...]] = {}
+        dont_cares: Set[int]                   = set()
+
+        if n_inputs <= _MAX_EXPAND_N:
+            for cube in dc_cube_list:
+                for m in _expand_cube_to_ints(cube, n_inputs):
+                    dont_cares.add(m)
+
+            on_bits: List[Set[int]] = [set() for _ in range(n_outputs)]
+            for input_cube, output_vals in cube_cover:
+                for m in _expand_cube_to_ints(input_cube, n_inputs):
+                    if m not in dont_cares:
+                        for j, v in enumerate(output_vals):
+                            if v == 1:
+                                on_bits[j].add(m)
+
+            all_m = set(range(1 << n_inputs))
+            for m in all_m - dont_cares:
+                rows[m] = tuple(1 if m in on_bits[j] else 0
+                                for j in range(n_outputs))
+
+        return cls(n_inputs, list(in_names), list(out_names),
+                   cube_cover, dc_cube_list, rows, dont_cares)
 
     @classmethod
     def from_function(
@@ -267,17 +339,13 @@ class TruthTable:
         output_names: List[str],
         func:         Callable[[Tuple[int, ...]], Tuple[int, ...]],
         dont_cares:   Optional[Set[int]] = None,
-    ) -> TruthTable:
-        """
-        Build from a Python function that maps input-bit-tuple → output-bit-tuple.
-
-        *func* is called for every non-don't-care input combination.
-        """
+    ) -> 'TruthTable':
+        """Build from a Python function mapping input-bit-tuple -> output-bit-tuple."""
         dc = dont_cares or set()
         rows: Dict[int, Tuple[int, ...]] = {}
         for m in range(1 << n_inputs):
             if m in dc:
                 continue
-            bits = tuple((m >> (n_inputs - 1 - i)) & 1 for i in range(n_inputs))
+            bits = _int_to_bits(m, n_inputs)
             rows[m] = func(bits)
-        return cls(n_inputs, input_names, output_names, rows, dc)
+        return cls.from_dict(n_inputs, input_names, output_names, rows, dc)

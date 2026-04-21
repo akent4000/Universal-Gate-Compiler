@@ -140,6 +140,86 @@ class AIG:
             self.make_and(self.make_not(a), b),
         )
 
+    # ── speculative construction (snapshot / restore) ────────────────────────
+    #
+    # Used by passes that want to try several alternative sub-networks and
+    # pick the one that grows the AIG the least.  snapshot() captures the
+    # node count + input table; restore(snap) truncates _nodes back to that
+    # state, drops any inputs created after the snapshot, and reconstructs
+    # _hash from the surviving AND nodes.  Literals obtained *before* the
+    # snapshot stay valid; literals issued *after* it must be discarded.
+
+    def snapshot(self) -> Tuple[int, List[str]]:
+        """Capture current AIG state for a later restore()."""
+        return (len(self._nodes), list(self._input_lits.keys()))
+
+    def restore(self, snap: Tuple[int, List[str]]) -> None:
+        """Roll the AIG back to a previous snapshot()."""
+        n, kept_input_names = snap
+        del self._nodes[n:]
+
+        kept: Dict[str, Lit] = {}
+        for name in kept_input_names:
+            if name in self._input_lits:
+                kept[name] = self._input_lits[name]
+        self._input_lits = kept
+
+        self._hash.clear()
+        for i, entry in enumerate(self._nodes):
+            if entry[0] == 'and':
+                _, a, b = entry
+                if a > b:
+                    a, b = b, a
+                self._hash[(a, b)] = (i + 1) * 2
+
+    # ── garbage collection ───────────────────────────────────────────────────
+
+    def gc(self, out_lits: List[Lit]) -> Tuple['AIG', List[Lit]]:
+        """
+        Return a compacted copy containing only nodes reachable from out_lits.
+
+        Dead nodes (translated but never referenced by any output) are removed
+        from both _nodes and _hash.  Structural hashing in the rebuilt AIG may
+        additionally merge node pairs that happen to become identical after
+        dead-code removal.
+
+        Typical caller: rewrite_aig(), once per round, to prevent phantom
+        MFFC-child translations from bloating the hash table.
+        """
+        # DFS from outputs to mark reachable node IDs.
+        reachable: set = set()
+        stack = [self.node_of(lit) for lit in out_lits if self.node_of(lit) > 0]
+        while stack:
+            nid = stack.pop()
+            if nid in reachable:
+                continue
+            reachable.add(nid)
+            entry = self._nodes[nid - 1]
+            if entry[0] == 'and':
+                _, a_lit, b_lit = entry
+                for child_lit in (a_lit, b_lit):
+                    ch = self.node_of(child_lit)
+                    if ch > 0 and ch not in reachable:
+                        stack.append(ch)
+
+        # Rebuild in topological order, skipping unreachable nodes.
+        new_aig = AIG()
+        lit_map: Dict[Lit, Lit] = {FALSE: FALSE, TRUE: TRUE}
+        for i, entry in enumerate(self._nodes):
+            nid = i + 1
+            if nid not in reachable:
+                continue
+            if entry[0] == 'input':
+                nlit = new_aig.make_input(entry[1])
+            else:
+                _, a_lit, b_lit = entry
+                nlit = new_aig.make_and(lit_map[a_lit], lit_map[b_lit])
+            lit_map[nid * 2]     = nlit
+            lit_map[nid * 2 + 1] = nlit ^ 1
+
+        new_outs = [lit_map.get(lit, lit) for lit in out_lits]
+        return new_aig, new_outs
+
     # ── cache inspection (non-mutating) ──────────────────────────────────────
 
     def has_and(self, a: Lit, b: Lit) -> bool:
