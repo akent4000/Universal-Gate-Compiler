@@ -1,0 +1,25 @@
+.i 4
+.o 7
+.ilb d3 d2 d1 d0
+.ob seg_a seg_b seg_c seg_d seg_e seg_f seg_g
+.p 16
+# BCD digit 0-9 to 7-segment (common-cathode, active-high)
+# seg: a b c d e f g
+0000 1111110
+0001 0110000
+0010 1101101
+0011 1111001
+0100 0110011
+0101 1011011
+0110 1011111
+0111 1110000
+1000 1111111
+1001 1111011
+# digits 10-15 never occur (don't-cares)
+1010 -------
+1011 -------
+1100 -------
+1101 -------
+1110 -------
+1111 -------
+.e

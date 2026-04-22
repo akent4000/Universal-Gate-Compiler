@@ -220,6 +220,32 @@ class AIG:
         new_outs = [lit_map.get(lit, lit) for lit in out_lits]
         return new_aig, new_outs
 
+    # ── hierarchical composition ─────────────────────────────────────────────
+
+    def compose(self, other: 'AIG', substitution: Dict[str, 'Lit']) -> Dict[int, 'Lit']:
+        """
+        Merge another AIG's nodes into self, substituting named inputs with literals.
+
+        substitution maps input names in `other` to literals already valid in self.
+        Inputs of `other` NOT in substitution become new primary inputs of self.
+
+        Returns a lit_map: other's node literal → corresponding literal in self,
+        covering both positive (nid*2) and complemented (nid*2+1) forms plus
+        the constants 0 and 1.
+        """
+        lit_map: Dict[int, int] = {0: 0, 1: 1}
+        for i, entry in enumerate(other._nodes):
+            nid = i + 1
+            if entry[0] == 'input':
+                name = entry[1]
+                nlit = substitution.get(name, self.make_input(name))
+            else:
+                _, a_lit, b_lit = entry
+                nlit = self.make_and(lit_map[a_lit], lit_map[b_lit])
+            lit_map[nid * 2]     = nlit
+            lit_map[nid * 2 + 1] = nlit ^ 1
+        return lit_map
+
     # ── cache inspection (non-mutating) ──────────────────────────────────────
 
     def has_and(self, a: Lit, b: Lit) -> bool:

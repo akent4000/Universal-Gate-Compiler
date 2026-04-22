@@ -1,0 +1,267 @@
+{
+  "files": {
+    "arithmetic/adder.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/adder.aig",
+      "header": {
+        "A": 1020,
+        "I": 256,
+        "L": 0,
+        "M": 1276,
+        "O": 129
+      },
+      "sha256": "60a28c90dc413ab479e07aba13185ae71ab7ffd3fd256c5e631212ee46170bcd",
+      "size": 7393,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/adder.aig"
+    },
+    "arithmetic/bar.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/bar.aig",
+      "header": {
+        "A": 3336,
+        "I": 135,
+        "L": 0,
+        "M": 3471,
+        "O": 128
+      },
+      "sha256": "28a3d895fe2821d4dcd04230751a059cb31ff5e28285a61ff7778cf71fb61da3",
+      "size": 14097,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/bar.aig"
+    },
+    "arithmetic/div.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/div.aig",
+      "header": {
+        "A": 57247,
+        "I": 128,
+        "L": 0,
+        "M": 57375,
+        "O": 128
+      },
+      "sha256": "e65955ae0931e5c7ed91a6210f0f6e6b7bd95eaeef1ffddcfb3e7ec633ed5d82",
+      "size": 177604,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/div.aig"
+    },
+    "arithmetic/hyp.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/hyp.aig",
+      "header": {
+        "A": 214335,
+        "I": 256,
+        "L": 0,
+        "M": 214591,
+        "O": 128
+      },
+      "sha256": "b0be478cd838b5fb7bb91ee695aae9e5e8a6ddb3035f965461bb709c21386549",
+      "size": 592213,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/hyp.aig"
+    },
+    "arithmetic/log2.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/log2.aig",
+      "header": {
+        "A": 32060,
+        "I": 32,
+        "L": 0,
+        "M": 32092,
+        "O": 32
+      },
+      "sha256": "146f031921372d0dc47c73ad2c82ce4e7413caff725204b7938a4cf61b1f15cb",
+      "size": 96543,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/log2.aig"
+    },
+    "arithmetic/max.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/max.aig",
+      "header": {
+        "A": 2865,
+        "I": 512,
+        "L": 0,
+        "M": 3377,
+        "O": 130
+      },
+      "sha256": "9a7c45c95cec2afbfd418468d8b5ff6a33161c591892e34ba34ff6ed3fbbb1a9",
+      "size": 17880,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/max.aig"
+    },
+    "arithmetic/multiplier.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/multiplier.aig",
+      "header": {
+        "A": 27062,
+        "I": 128,
+        "L": 0,
+        "M": 27190,
+        "O": 128
+      },
+      "sha256": "543555652101e587c1d1b18a38eb18dfebcb5f85e63e35c781361aa26888946e",
+      "size": 80932,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/multiplier.aig"
+    },
+    "arithmetic/sin.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/sin.aig",
+      "header": {
+        "A": 5416,
+        "I": 24,
+        "L": 0,
+        "M": 5440,
+        "O": 25
+      },
+      "sha256": "e1a649d2eca27337787cb4aed79abe120f49597975beaed8bffd6a329c2664b3",
+      "size": 15207,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/sin.aig"
+    },
+    "arithmetic/sqrt.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/sqrt.aig",
+      "header": {
+        "A": 24618,
+        "I": 128,
+        "L": 0,
+        "M": 24746,
+        "O": 64
+      },
+      "sha256": "2fdf59877a0f1ceba46a2a3aca5457e05c47ac24ceb69839a4c12d071cf62300",
+      "size": 69537,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/sqrt.aig"
+    },
+    "arithmetic/square.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/square.aig",
+      "header": {
+        "A": 18484,
+        "I": 64,
+        "L": 0,
+        "M": 18548,
+        "O": 128
+      },
+      "sha256": "c3fe8598cf501743043cf573b7226478a06be9dfb180d17bca77cdfbe667d784",
+      "size": 51034,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/arithmetic/square.aig"
+    },
+    "random_control/arbiter.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/arbiter.aig",
+      "header": {
+        "A": 11839,
+        "I": 256,
+        "L": 0,
+        "M": 12095,
+        "O": 129
+      },
+      "sha256": "0eacc0a97717bbc91f732ce6814bbfcdefa8a0b65b13ade6f002e35d0e585d82",
+      "size": 45159,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/arbiter.aig"
+    },
+    "random_control/cavlc.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/cavlc.aig",
+      "header": {
+        "A": 693,
+        "I": 10,
+        "L": 0,
+        "M": 703,
+        "O": 11
+      },
+      "sha256": "125e0fdeb41ccadac5e6ada71f3c416fd026cfcbc8e75ad1c6b57ddc2b100f31",
+      "size": 2453,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/cavlc.aig"
+    },
+    "random_control/ctrl.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/ctrl.aig",
+      "header": {
+        "A": 174,
+        "I": 7,
+        "L": 0,
+        "M": 181,
+        "O": 26
+      },
+      "sha256": "9da22b9ba9917569878d750926623d3920a4cd985a0980cc65763c5d3ac0e78b",
+      "size": 1119,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/ctrl.aig"
+    },
+    "random_control/dec.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/dec.aig",
+      "header": {
+        "A": 304,
+        "I": 8,
+        "L": 0,
+        "M": 312,
+        "O": 256
+      },
+      "sha256": "38def606e795975e469273411ee9217bc43656c57e6f6eeda3ea640452fa3443",
+      "size": 6608,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/dec.aig"
+    },
+    "random_control/i2c.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/i2c.aig",
+      "header": {
+        "A": 1342,
+        "I": 147,
+        "L": 0,
+        "M": 1489,
+        "O": 142
+      },
+      "sha256": "3f6ab413a3f745c87811fa6565d972146f1f4e6ede78fae71fcb16e469b9b213",
+      "size": 7550,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/i2c.aig"
+    },
+    "random_control/int2float.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/int2float.aig",
+      "header": {
+        "A": 260,
+        "I": 11,
+        "L": 0,
+        "M": 271,
+        "O": 7
+      },
+      "sha256": "ad280bdb8331591998b8184ff70ad00d31184649c245796965fc6777e3016bab",
+      "size": 992,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/int2float.aig"
+    },
+    "random_control/mem_ctrl.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/mem_ctrl.aig",
+      "header": {
+        "A": 46836,
+        "I": 1204,
+        "L": 0,
+        "M": 48040,
+        "O": 1231
+      },
+      "sha256": "390d601836717129b903a5ecc8fd96b41d322d26895d666b303c64b796bd0d1d",
+      "size": 193732,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/mem_ctrl.aig"
+    },
+    "random_control/priority.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/priority.aig",
+      "header": {
+        "A": 978,
+        "I": 128,
+        "L": 0,
+        "M": 1106,
+        "O": 8
+      },
+      "sha256": "9123187c4169189f53f17a84367c4bd5f749b13298f9619ef601c5de4ee90678",
+      "size": 4061,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/priority.aig"
+    },
+    "random_control/router.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/router.aig",
+      "header": {
+        "A": 257,
+        "I": 60,
+        "L": 0,
+        "M": 317,
+        "O": 30
+      },
+      "sha256": "fe8d13d4efe05fc3400ab8c94c0d1ce07ee24dd2ec106f7ae3d24e962e80efbd",
+      "size": 2217,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/router.aig"
+    },
+    "random_control/voter.aig": {
+      "browse_url": "https://github.com/lsils/benchmarks/blob/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/voter.aig",
+      "header": {
+        "A": 13758,
+        "I": 1001,
+        "L": 0,
+        "M": 14759,
+        "O": 1
+      },
+      "sha256": "10ea098f4fca120ba55dd1abd5fab34d6a4df6099c4f411bc8592a27f9caf324",
+      "size": 45327,
+      "source_url": "https://raw.githubusercontent.com/lsils/benchmarks/5d342c70d557b5371ce24c20d9d277fb191197f3/random_control/voter.aig"
+    }
+  },
+  "upstream_commit": "5d342c70d557b5371ce24c20d9d277fb191197f3",
+  "upstream_date": "2026-03-03",
+  "upstream_repo": "https://github.com/lsils/benchmarks"
+}

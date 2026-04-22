@@ -1,0 +1,46 @@
+{
+  "stages": [
+    {
+      "id": "bcd",
+      "pla": "Binary_to_BCD_0-99_with_dc.pla"
+    },
+    {
+      "id": "tens",
+      "pla": "BCD_to_7seg.pla",
+      "connect": {
+        "d3": "t3",
+        "d2": "t2",
+        "d1": "t1",
+        "d0": "t0"
+      },
+      "rename": {
+        "seg_a": "t_a",
+        "seg_b": "t_b",
+        "seg_c": "t_c",
+        "seg_d": "t_d",
+        "seg_e": "t_e",
+        "seg_f": "t_f",
+        "seg_g": "t_g"
+      }
+    },
+    {
+      "id": "units",
+      "pla": "BCD_to_7seg.pla",
+      "connect": {
+        "d3": "u3",
+        "d2": "u2",
+        "d1": "u1",
+        "d0": "u0"
+      },
+      "rename": {
+        "seg_a": "u_a",
+        "seg_b": "u_b",
+        "seg_c": "u_c",
+        "seg_d": "u_d",
+        "seg_e": "u_e",
+        "seg_f": "u_f",
+        "seg_g": "u_g"
+      }
+    }
+  ]
+}

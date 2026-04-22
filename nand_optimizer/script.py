@@ -31,6 +31,21 @@ dc [-K N] [-T N] [-W N] [-r N] [-C N] [--no-sdc] [--odc] [--dc-exact] [--no-resu
                        --dc-exact enable SAT-based exact-synth fallback
                                   for cuts with k > 4 (requires -K >= 5)
                        --no-resub disable V2.c window resubstitution
+bidec [-K N] [-k N] [-r N] [-z]
+                     disjoint-support bi-decomposition (AND/OR/XOR)
+                       -K N   max cut size      (default 8)
+                       -k N   min cut size      (default 5)
+                       -r N   rounds            (default 1)
+                       -z     SAT exact synthesis for halves with >4 inputs
+bdd [-K N]           BDD-guided per-output rebuild via sifting reorder
+                       -K N   max supports size (default 16)
+resub [-K N] [-k N] [-M N] [-D N] [-r N]
+                     functional resubstitution for wide cuts (dc2-style)
+                       -K N   max cut size      (default 7)
+                       -k N   min cut size      (default 5)
+                       -M N   max divisors m    (default 3)
+                       -D N   divisor pool cap  (default 20)
+                       -r N   rounds            (default 1)
 
 Bandit-guided search
 --------------------
@@ -167,16 +182,18 @@ def parse_script(script: str) -> List[Tuple[str, Dict[str, Any]]]:
         if not tokens:
             continue
         cmd = tokens[0].lower()
-        if cmd not in ('balance', 'rewrite', 'refactor', 'fraig', 'dc'):
+        if cmd not in ('balance', 'rewrite', 'refactor', 'fraig', 'dc',
+                       'bidec', 'bdd', 'resub'):
             raise ValueError(
                 f"Unknown synthesis command '{tokens[0]}'. "
-                f"Supported: balance, rewrite, refactor, fraig, dc"
+                f"Supported: balance, rewrite, refactor, fraig, dc, "
+                f"bidec, bdd, resub"
             )
         kwargs: Dict[str, Any] = {}
         i = 1
         while i < len(tokens):
             tok = tokens[i]
-            if tok == '-z' and cmd in ('rewrite', 'refactor'):
+            if tok == '-z' and cmd in ('rewrite', 'refactor', 'bidec'):
                 kwargs['use_exact'] = True
             elif tok == '--no-sdc' and cmd == 'dc':
                 kwargs['use_sdc'] = False
@@ -188,7 +205,7 @@ def parse_script(script: str) -> List[Tuple[str, Dict[str, Any]]]:
                 kwargs['use_exact'] = True
             elif tok == '--no-resub' and cmd == 'dc':
                 kwargs['use_resub'] = False
-            elif tok in ('-r', '-K', '-T', '-W', '-C'):
+            elif tok in ('-r', '-K', '-T', '-W', '-C', '-k', '-M', '-D'):
                 if i + 1 >= len(tokens):
                     raise ValueError(
                         f"Flag {tok} requires an integer argument "
@@ -196,11 +213,34 @@ def parse_script(script: str) -> List[Tuple[str, Dict[str, Any]]]:
                     )
                 val = int(tokens[i + 1])
                 if tok == '-r':
-                    if cmd not in ('rewrite', 'refactor', 'dc'):
-                        raise ValueError(f"Flag -r is only valid for 'rewrite', 'refactor', or 'dc'")
+                    if cmd not in ('rewrite', 'refactor', 'dc', 'bidec', 'resub'):
+                        raise ValueError(f"Flag -r is only valid for 'rewrite', "
+                                         f"'refactor', 'dc', 'bidec', or 'resub'")
                     kwargs['rounds'] = val
                 elif tok == '-K':
-                    kwargs['cut_size'] = val
+                    if cmd == 'bdd':
+                        kwargs['max_inputs'] = val
+                    elif cmd == 'bidec':
+                        kwargs['cut_size'] = val
+                    elif cmd == 'resub':
+                        kwargs['cut_size_max'] = val
+                    else:
+                        kwargs['cut_size'] = val
+                elif tok == '-k':
+                    if cmd == 'bidec':
+                        kwargs['min_cut'] = val
+                    elif cmd == 'resub':
+                        kwargs['cut_size_min'] = val
+                    else:
+                        raise ValueError(f"Flag -k is only valid for 'bidec' or 'resub'")
+                elif tok == '-M':
+                    if cmd != 'resub':
+                        raise ValueError(f"Flag -M is only valid for 'resub'")
+                    kwargs['max_m'] = val
+                elif tok == '-D':
+                    if cmd != 'resub':
+                        raise ValueError(f"Flag -D is only valid for 'resub'")
+                    kwargs['max_divisors'] = val
                 elif tok == '-T':
                     if cmd != 'dc':
                         raise ValueError(f"Flag -T is only valid for 'dc'")
@@ -296,6 +336,24 @@ def run_script(
             if 'care_rounds' in dc_kwargs:
                 dc_kwargs['rounds'] = dc_kwargs.pop('care_rounds')
             aig, out_lits = dc_optimize(aig, out_lits, **dc_kwargs)
+            if verbose:
+                print(f"      nodes: {n_before} -> {aig.n_nodes}")
+
+        elif cmd == 'bidec':
+            from .bidec import bidec_aig
+            aig, out_lits = bidec_aig(aig, out_lits, **kwargs)
+            if verbose:
+                print(f"      nodes: {n_before} -> {aig.n_nodes}")
+
+        elif cmd == 'bdd':
+            from .bdd_decomp import bdd_decompose_aig
+            aig, out_lits = bdd_decompose_aig(aig, out_lits, **kwargs)
+            if verbose:
+                print(f"      nodes: {n_before} -> {aig.n_nodes}")
+
+        elif cmd == 'resub':
+            from .sat_resub import resub_aig
+            aig, out_lits = resub_aig(aig, out_lits, **kwargs)
             if verbose:
                 print(f"      nodes: {n_before} -> {aig.n_nodes}")
 

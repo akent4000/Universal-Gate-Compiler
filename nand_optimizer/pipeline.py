@@ -16,7 +16,11 @@ from .expr          import Expr, ZERO
 from .implicant     import Implicant, espresso, implicants_to_expr, int_to_bits
 from .optimize      import phase_assign, factorize
 from .implicant     import _expand_cubes_to_set
-from .decomposition import DecompositionResult, ashenhurst_decompose
+from .decomposition import (DecompositionResult, ashenhurst_decompose,
+                             ashenhurst_decompose_recursive,
+                             RecursiveDecompositionResult,
+                             multi_output_decompose,
+                             SharedDecompositionResult)
 from .nand          import (NANDBuilder, Gate, dead_code_elimination,
                             eval_network, nand_gate_count)
 from .profile       import ProfileReport, profile_pass
@@ -103,11 +107,20 @@ def _phase2(
     verbose:      bool,
     out_idx:      int = 0,
     decompose:    bool = True,
+    shared_prebuilt: Optional[Dict[str, int]] = None,
 ) -> None:
+    """
+    Per-output AIG construction with a recursive Ashenhurst-Curtis bake-off.
+
+    `shared_prebuilt` carries h-literal bindings already materialised by the
+    multi-output shared decomposition pass (if it ran).  When present, the
+    per-output decomposition is skipped — the caller has already decided that
+    this output is built on top of the shared h-bus, and `r.expr_fact` has
+    been replaced with the corresponding g_j expression.
+    """
     var_names = tt.input_names
 
     if verbose:
-        bar = '-' * 54
         print(f'\n  -- {r.name} : post-cross-output --')
 
     # Shannon decomposition and redundant inversion elimination are now handled
@@ -116,36 +129,37 @@ def _phase2(
     r.expr_shan  = r.expr_fact
     r.expr_clean = r.expr_fact
 
-    # [4] Ashenhurst-Curtis / Roth-Karp Functional Decomposition
-    h_opt:  List[Expr] = []
-    g_opt:  Optional[Expr] = None
-    decomp: Optional[DecompositionResult] = None
+    from .nand import expr_to_aig
+
+    # Shared-support path: h's have already been pushed into the AIG by the
+    # caller and r.expr_fact is g_j(h-names, X_free).  Just build g_j.
+    if shared_prebuilt is not None:
+        out_lit = expr_to_aig(r.expr_fact, aig, var_map=shared_prebuilt)
+        if r.is_comp:
+            out_lit = aig.make_not(out_lit)
+        r.decomp      = None
+        r.decomp_used = True
+        r.out_lit     = out_lit
+        if verbose:
+            print(f'\n  [4] Shared-support decomposition (applied)')
+            print(f'      OUTPUT({r.name}) <- lit {out_lit}')
+        return
+
+    # [4] Recursive Ashenhurst-Curtis / Roth-Karp Functional Decomposition
+    rdecomp: Optional[RecursiveDecompositionResult] = None
     use_decomp = False
 
     if decompose and tt.n_inputs >= 3 and tt.n_inputs <= 12:
-        # Compute decomp_target only when needed (avoid set(range(1<<n)) for large n)
         if r.is_comp:
             decomp_target = (set(range(1 << tt.n_inputs)) - r.ones - tt.dont_cares)
         else:
             decomp_target = r.ones
-        decomp = ashenhurst_decompose(
+        rdecomp = ashenhurst_decompose_recursive(
             decomp_target, tt.dont_cares, tt.n_inputs, var_names,
-            h_name_prefix=f'__d{out_idx}_h',
         )
 
-    if decomp is not None:
-        for he in decomp.h_exprs:
-            h_opt.append(factorize(he))
-        g_opt = factorize(decomp.g_expr)
-
-    # [5] AIG Construction — snapshot/restore for the decomposition bake-off
-    from .nand import expr_to_aig
-    if decomp is not None:
-        # Speculative build: snapshot the shared AIG, try baseline first,
-        # then try decomposition from the same starting point, keep the
-        # version that grew the AIG by fewer AND nodes.  Measuring on the
-        # *shared* AIG means structural-hash sharing with previously-built
-        # outputs is accounted for correctly.
+    # [5] AIG Construction — whole-tree snapshot/restore bake-off
+    if rdecomp is not None:
         snap      = aig.snapshot()
         size0     = aig.n_ands
 
@@ -155,9 +169,9 @@ def _phase2(
         aig.restore(snap)
 
         dmap: Dict[str, int] = {}
-        for hn, he in zip(decomp.h_names, h_opt):
-            dmap[hn] = expr_to_aig(he, aig)
-        lit_dec   = expr_to_aig(g_opt, aig, var_map=dmap)
+        for node in rdecomp.pre_nodes:
+            dmap[node.name] = expr_to_aig(factorize(node.expr), aig, var_map=dmap)
+        lit_dec   = expr_to_aig(factorize(rdecomp.root_expr), aig, var_map=dmap)
         cost_dec  = aig.n_ands - size0
 
         if cost_dec < cost_base:
@@ -170,9 +184,9 @@ def _phase2(
 
         if verbose:
             tag = 'applied' if use_decomp else 'rejected'
-            print(f'\n  [4] Ashenhurst-Curtis Decomposition  ({tag})')
-            print(f'      |Xb|={len(decomp.bound_vars)}, mu={decomp.mu}, '
-                  f'k={decomp.k},  shared-AIG delta: '
+            print(f'\n  [4] Recursive Ashenhurst-Curtis Decomposition  ({tag})')
+            print(f'      depth={rdecomp.depth}, '
+                  f'{rdecomp.n_nodes} aux node(s),  shared-AIG delta: '
                   f'baseline {cost_base} vs decomposed {cost_dec} AND nodes')
     else:
         if verbose:
@@ -182,7 +196,7 @@ def _phase2(
     if r.is_comp:
         out_lit = aig.make_not(out_lit)
 
-    r.decomp      = decomp
+    r.decomp      = None
     r.decomp_used = use_decomp
     r.out_lit     = out_lit
 
@@ -243,6 +257,8 @@ class OptimizeResult:
         self.profile:     Optional[ProfileReport]     = None
         self.aig:         Optional[object]            = None   # final AIG after rewriting
         self.out_lits:    List[int]                   = []     # output literals into aig
+        self.sta:         Optional[object]            = None   # STAResult (see sta.py)
+        self.switching:   Optional[object]            = None   # SwitchingActivity (see switching.py)
 
     def __getitem__(self, key: str) -> OutputResult:
         return self.outputs[key]
@@ -260,7 +276,9 @@ class OptimizeResult:
 def optimize(tt: TruthTable, verbose: bool = True,
              profile: bool = False, decompose: bool = True,
              balance: bool = True,
-             script: Optional[str] = None) -> OptimizeResult:
+             script: Optional[str] = None,
+             bandit_horizon: int = 0,
+             bandit_strategy: str = 'ucb1') -> OptimizeResult:
     if verbose:
         print('======================================================')
         print('   NAND OPTIMIZER                                     ')
@@ -321,10 +339,101 @@ def optimize(tt: TruthTable, verbose: bool = True,
         from .aig import AIG
         builder._aig = AIG()
 
+    # Phase 2.3: Shared-support Ashenhurst-Curtis across all outputs ---------
+    #
+    # A single joint chart over every output is searched for a bipartition
+    # X_bound ∪ X_free whose column multiplicity admits a shared h-bus.
+    # When found, every output is built on top of the same h-literals,
+    # which is the main lever for the bin→BCD→7seg gap (215 vs 370 NAND).
+    #
+    # Bake-off is done on the shared AIG at whole-pipeline level: snapshot,
+    # try shared build, compare to per-output recursive build, keep the
+    # smaller one.
+    shared_bindings: Optional[Dict[str, int]] = None
+    shared: Optional[SharedDecompositionResult] = None
+    shared_exprs: List[Expr] = []
+
+    if decompose and tt.n_outputs >= 2 and 3 <= tt.n_inputs <= 12:
+        per_output_targets: List[set] = []
+        for idx in range(tt.n_outputs):
+            r = result.outputs[tt.output_names[idx]]
+            if r.is_comp:
+                per_output_targets.append(
+                    set(range(1 << tt.n_inputs)) - r.ones - tt.dont_cares
+                )
+            else:
+                per_output_targets.append(set(r.ones))
+
+        with profile_pass('Shared-support decomposition', report,
+                          detail=f'{tt.n_outputs} outputs, {tt.n_inputs} vars'):
+            shared = multi_output_decompose(
+                per_output_targets, tt.dont_cares,
+                tt.n_inputs, tt.input_names,
+                output_names=tt.output_names,
+            )
+
+    if shared is not None:
+        # Speculative AIG build of shared h-bus + per-output g_j.
+        aig = builder._aig
+        snap_shared = aig.snapshot()
+        size0 = aig.n_ands
+
+        from .nand import expr_to_aig
+        dmap_shared: Dict[str, int] = {}
+        for hn, he in zip(shared.h_names, shared.h_exprs):
+            dmap_shared[hn] = expr_to_aig(factorize(he), aig, var_map=dmap_shared)
+
+        shared_g_lits: List[int] = []
+        for gj in shared.g_exprs:
+            shared_g_lits.append(expr_to_aig(factorize(gj), aig, var_map=dmap_shared))
+        cost_shared = aig.n_ands - size0
+
+        # Per-output recursive baseline for comparison.
+        aig.restore(snap_shared)
+        size0 = aig.n_ands
+        for idx, name in enumerate(tt.output_names):
+            r = result.outputs[name]
+            expr_to_aig(r.expr_fact, aig)
+        cost_per_output = aig.n_ands - size0
+
+        if cost_shared < cost_per_output:
+            # Commit shared build.
+            aig.restore(snap_shared)
+            shared_bindings = {}
+            for hn, he in zip(shared.h_names, shared.h_exprs):
+                shared_bindings[hn] = expr_to_aig(
+                    factorize(he), aig, var_map=shared_bindings)
+            # Replace each output's expr_fact with its g_j and record it.
+            for idx, name in enumerate(tt.output_names):
+                r = result.outputs[name]
+                r.expr_fact  = shared.g_exprs[idx]
+                r.expr_shan  = shared.g_exprs[idx]
+                r.expr_clean = shared.g_exprs[idx]
+                shared_exprs.append(shared.g_exprs[idx])
+
+            if verbose:
+                print(f"\n  [3.5] Shared-support decomposition (applied)")
+                print(f"        |Xb|={len(shared.bound_vars)}, "
+                      f"k={shared.k}, mu={shared.mu}, "
+                      f"AIG delta: shared {cost_shared} vs per-output {cost_per_output}")
+        else:
+            if verbose:
+                print(f"\n  [3.5] Shared-support decomposition (rejected)")
+                print(f"        |Xb|={len(shared.bound_vars)}, "
+                      f"k={shared.k}, mu={shared.mu}, "
+                      f"AIG delta: shared {cost_shared} vs per-output {cost_per_output}")
+            # Roll back to the clean checkpoint so _phase2 sees a truly empty AIG
+            # and its own bake-off works correctly.
+            aig.restore(snap_shared)
+            shared = None
+    elif verbose and decompose and tt.n_outputs >= 2 and 3 <= tt.n_inputs <= 12:
+        print(f"\n  [3.5] Shared-support decomposition (no candidate)")
+
     with profile_pass('AIG build (direct)', report):
         for idx, name in enumerate(tt.output_names):
             _phase2(tt, result.outputs[name], builder._aig, verbose,
-                    out_idx=idx, decompose=decompose)
+                    out_idx=idx, decompose=decompose,
+                    shared_prebuilt=shared_bindings)
 
     out_lits = [result.outputs[name].out_lit for name in tt.output_names]
 
@@ -337,6 +446,20 @@ def optimize(tt: TruthTable, verbose: bool = True,
         with profile_pass('Synthesis script', report, detail=script):
             new_aig, new_out_lits = run_script(
                 builder._aig, out_lits, script, verbose)
+    elif bandit_horizon > 0:
+        # Bandit-guided synthesis: adaptively select passes.
+        from .script import run_bandit
+        if verbose:
+            print(f"\n  [post-AIG] Bandit synthesis "
+                  f"(strategy={bandit_strategy!r}, horizon={bandit_horizon})")
+        with profile_pass('Bandit synthesis', report,
+                          detail=f'horizon={bandit_horizon} strategy={bandit_strategy}'):
+            new_aig, new_out_lits, _bandit = run_bandit(
+                builder._aig, out_lits,
+                horizon=bandit_horizon,
+                strategy=bandit_strategy,
+                verbose=verbose,
+            )
     else:
         # Phase 3: DAG-aware AIG Rewriting ------------------------------------
         if verbose:
@@ -423,6 +546,23 @@ def optimize(tt: TruthTable, verbose: bool = True,
 
     result.total_nand = nand_gate_count(builder.gates)
 
+    # [10] Static Timing Analysis ------------------------------------------
+    from .sta import compute_sta
+    sta = compute_sta(result)
+    if verbose:
+        sta.print_summary(output_names=list(tt.output_names))
+
+    # [11] Switching Activity Estimation -----------------------------------
+    from .switching import estimate_switching as _est_sw
+    sw = _est_sw(new_aig, new_out_lits, output_names=list(tt.output_names))
+    result.switching = sw
+    if verbose:
+        print(f"\n  [SW] Switching Activity  "
+              f"(total AND-node: {sw.total_activity:.4f}, "
+              f"max possible: {0.25 * new_aig.n_ands:.4f})")
+        for name, p in sw.output_probs.items():
+            print(f"       OUT {name:<12} P(1)={p:.4f}  sw={p*(1-p):.4f}")
+
     # -- Summary -----------------------------------------------------------
     if verbose:
         print('\n' + '-' * 68)
@@ -464,3 +604,149 @@ def optimize(tt: TruthTable, verbose: bool = True,
         report.print()
 
     return result
+
+
+# ── Hierarchical (multi-stage) synthesis ────────────────────────────────────
+
+def hierarchical_optimize(
+    stage_specs: list,
+    post_script: Optional[str] = None,
+    verbose: bool = True,
+) -> 'OptimizeResult':
+    """
+    Multi-stage hierarchical synthesis.
+
+    stage_specs is a list of dicts, each with:
+      'tt'      : TruthTable for this stage
+      'connect' : dict {input_name → source_name} — maps inputs of this stage
+                  to named outputs of any previously processed stage.
+                  Absent or None for the first stage (pure primary inputs).
+      'rename'  : dict {old_output_name → new_output_name} (optional).
+
+    Algorithm:
+      1. Optimize every unique TruthTable independently with the default
+         rewrite/fraig/balance pipeline.
+      2. Walk stages in order; compose each stage's AIG into a single shared
+         AIG via AIG.compose(), substituting 'connect' inputs with the
+         literal produced by the previous stage(s).
+      3. GC the combined AIG, then run post_script (default:
+         "rewrite; fraig; balance; rewrite -z; fraig; balance").
+      4. Map to NAND gates and return an OptimizeResult.
+    """
+    from .script import run_script
+    from .nand   import aig_to_gates, nand_gate_count, NANDBuilder
+    from .aig    import AIG
+
+    default_stage_script = "rewrite; fraig; balance; rewrite -z; fraig; balance"
+    if post_script is None:
+        post_script = "rewrite; fraig; balance; rewrite -z; fraig; balance"
+
+    # --- Step 1: optimise each unique TruthTable once ----------------------
+    _cache: dict = {}
+    for spec in stage_specs:
+        tt = spec['tt']
+        key = id(tt)
+        if key not in _cache:
+            if verbose:
+                print(f"\n  [hierarchical] Optimising stage: {tt.output_names}")
+            _cache[key] = optimize(tt, verbose=verbose,
+                                   script=default_stage_script)
+
+    # --- Step 2: compose stages into one AIG --------------------------------
+    # Start with an empty AIG; the first stage provides primary inputs.
+    combined_aig = AIG()
+    available: dict = {}   # name → lit in combined_aig
+
+    final_out_lits:  list = []
+    final_out_names: list = []
+
+    for spec in stage_specs:
+        tt      = spec['tt']
+        connect = spec.get('connect') or {}
+        rename  = spec.get('rename')  or {}
+
+        stage_result = _cache[id(tt)]
+        stage_aig    = stage_result.aig
+
+        # Build substitution: stage input names → lits in combined_aig
+        subst = {}
+        for inp in tt.input_names:
+            if inp in connect:
+                src = connect[inp]
+                if src not in available:
+                    raise KeyError(
+                        f"hierarchical_optimize: source '{src}' not yet "
+                        f"defined (stage tt={tt.output_names})")
+                subst[inp] = available[src]
+            # inputs NOT in connect become new primary inputs (handled inside compose)
+
+        # Merge stage into combined_aig
+        lit_map = combined_aig.compose(stage_aig, subst)
+
+        # Register this stage's outputs (possibly renamed) in available pool
+        stage_out_lits = [lit_map[l] for l in stage_result.out_lits]
+        for out_name, lit in zip(tt.output_names, stage_out_lits):
+            new_name = rename.get(out_name, out_name)
+            available[new_name] = lit
+
+        # The last stages' outputs become the final circuit outputs
+        final_out_lits  = [lit_map[l] for l in stage_result.out_lits]
+        final_out_names = [rename.get(n, n) for n in tt.output_names]
+
+    # Accumulate all final outputs (all terminal stages contribute)
+    # Re-collect: every stage whose output name wasn't consumed as an input
+    # to a later stage is a "terminal" output.
+    consumed_as_input: set = set()
+    for spec in stage_specs:
+        for src in (spec.get('connect') or {}).values():
+            consumed_as_input.add(src)
+
+    combined_out_lits:  list = []
+    combined_out_names: list = []
+    for name, lit in available.items():
+        if name not in consumed_as_input:
+            combined_out_lits.append(lit)
+            combined_out_names.append(name)
+
+    # --- Step 3: GC + post-composition optimisation -------------------------
+    combined_aig, combined_out_lits = combined_aig.gc(combined_out_lits)
+
+    if verbose:
+        print(f"\n  [hierarchical] Combined AIG: {combined_aig.n_ands} AND nodes, "
+              f"{len(combined_out_lits)} outputs")
+        print(f"  [hierarchical] Post-script: {post_script!r}")
+
+    new_aig, new_out_lits = run_script(
+        combined_aig, combined_out_lits, post_script, verbose)
+
+    if verbose:
+        print(f"\n  [hierarchical] After script: {new_aig.n_ands} AND nodes")
+
+    # --- Step 4: NAND mapping -----------------------------------------------
+    final_gates, out_wires, _n_xor = aig_to_gates(new_aig, new_out_lits)
+
+    builder = NANDBuilder()
+    builder._aig   = new_aig
+    builder.gates  = final_gates
+
+    r = OptimizeResult()
+    r.aig        = new_aig
+    r.out_lits   = new_out_lits
+    r.builder    = builder
+
+    # Populate per-output stubs so downstream consumers (verify, export_circ,
+    # iteration) can treat a hierarchical OptimizeResult like a flat one.
+    for i, name in enumerate(combined_out_names):
+        builder.gates.append((name, 'OUTPUT', [out_wires[i]]))
+        stub = OutputResult()
+        stub.name     = name
+        stub.out_wire = out_wires[i]
+        stub.gates    = list(builder.gates)
+        r.outputs[name] = stub
+
+    r.total_nand = nand_gate_count(builder.gates)
+
+    if verbose:
+        print(f"\n  [hierarchical] TOTAL NAND GATES: {r.total_nand}")
+
+    return r

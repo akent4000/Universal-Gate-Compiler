@@ -147,9 +147,43 @@ def partial_detector() -> StateTable:
     )
 
 
+def mod4_counter_async_reset() -> StateTable:
+    """
+    Mod-4 Moore counter with an asynchronous active-low reset signal.
+
+    The reset is *not* part of ``input_names`` — it is a separate control
+    tract routed directly to every flip-flop's CLR pin in the exported
+    circuit, and level-sensitive in simulation: when RESET_N is low the
+    state snaps to Q0 and CLK edges are ignored until it is released.
+    """
+    transitions = [
+        Transition('Q0', (), 'Q1', ()),
+        Transition('Q1', (), 'Q2', ()),
+        Transition('Q2', (), 'Q3', ()),
+        Transition('Q3', (), 'Q0', ()),
+    ]
+    return StateTable(
+        states       = ['Q0', 'Q1', 'Q2', 'Q3'],
+        input_names  = [],
+        output_names = ['y1', 'y0'],
+        transitions  = transitions,
+        model        = 'moore',
+        reset_state  = 'Q0',
+        state_outputs = {
+            'Q0': (0, 0),
+            'Q1': (0, 1),
+            'Q2': (1, 0),
+            'Q3': (1, 1),
+        },
+        reset_input_name = 'RESET_N',
+        reset_polarity   = 'async_low',
+    )
+
+
 FSM_EXAMPLES = {
     'seq101':       ('101-sequence detector (Mealy)',       seq_detector_101),
     'mod4':         ('Mod-4 up counter (Moore)',            mod4_counter),
+    'mod4_rst':     ('Mod-4 counter, async-low reset',      mod4_counter_async_reset),
     'redundant':    ('Redundant 101 detector (Hopcroft)',   redundant_detector),
     'partial':      ('Partial 101 detector (IS-FSM)',       partial_detector),
 }

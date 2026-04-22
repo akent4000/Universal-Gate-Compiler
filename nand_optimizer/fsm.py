@@ -84,26 +84,43 @@ class StateTable:
 
     def __init__(
         self,
-        states:         List[str],
-        input_names:    List[str],
-        output_names:   List[str],
-        transitions:    List[Transition],
-        model:          str                      = 'mealy',
-        reset_state:    Optional[str]            = None,
-        state_outputs:  Optional[Dict[str, Tuple[int, ...]]] = None,
+        states:            List[str],
+        input_names:       List[str],
+        output_names:      List[str],
+        transitions:       List[Transition],
+        model:             str                      = 'mealy',
+        reset_state:       Optional[str]            = None,
+        state_outputs:     Optional[Dict[str, Tuple[int, ...]]] = None,
+        reset_input_name:  Optional[str]            = None,
+        reset_polarity:    str                      = 'sync',
     ):
         if model not in ('mealy', 'moore'):
             raise ValueError(f"model must be 'mealy' or 'moore', got {model!r}")
         if not states:
             raise ValueError("states must be non-empty")
+        if reset_polarity not in ('sync', 'async_low', 'async_high'):
+            raise ValueError(
+                f"reset_polarity must be 'sync', 'async_low', or "
+                f"'async_high', got {reset_polarity!r}")
+        if reset_polarity != 'sync' and reset_input_name is None:
+            raise ValueError(
+                f"reset_polarity={reset_polarity!r} requires reset_input_name")
+        if reset_input_name is not None and reset_input_name in input_names:
+            raise ValueError(
+                f"reset_input_name {reset_input_name!r} must not appear in "
+                f"input_names — the async reset is a separate control tract "
+                f"routed directly to flip-flop CLR pins, not to the "
+                f"combinational excitation cone")
 
-        self.states        = list(states)
-        self.input_names   = list(input_names)
-        self.output_names  = list(output_names)
-        self.transitions   = list(transitions)
-        self.model         = model
-        self.reset_state   = reset_state if reset_state is not None else self.states[0]
-        self.state_outputs = dict(state_outputs) if state_outputs else {}
+        self.states            = list(states)
+        self.input_names       = list(input_names)
+        self.output_names      = list(output_names)
+        self.transitions       = list(transitions)
+        self.model             = model
+        self.reset_state       = reset_state if reset_state is not None else self.states[0]
+        self.state_outputs     = dict(state_outputs) if state_outputs else {}
+        self.reset_input_name  = reset_input_name
+        self.reset_polarity    = reset_polarity
 
         if self.reset_state not in self.states:
             raise ValueError(f"reset_state {self.reset_state!r} not in states")
@@ -382,13 +399,15 @@ def _minimize_completely_specified(stt: StateTable) -> StateTable:
             new_state_outputs[s] = stt.state_outputs[s]
 
     return StateTable(
-        states        = new_states_ordered,
-        input_names   = stt.input_names,
-        output_names  = stt.output_names,
-        transitions   = new_transitions,
-        model         = stt.model,
-        reset_state   = rep[stt.reset_state],
-        state_outputs = new_state_outputs,
+        states            = new_states_ordered,
+        input_names       = stt.input_names,
+        output_names      = stt.output_names,
+        transitions       = new_transitions,
+        model             = stt.model,
+        reset_state       = rep[stt.reset_state],
+        state_outputs     = new_state_outputs,
+        reset_input_name  = stt.reset_input_name,
+        reset_polarity    = stt.reset_polarity,
     )
 
 
@@ -560,13 +579,15 @@ def _minimize_incompletely_specified(stt: StateTable) -> StateTable:
             new_state_outputs[r] = tuple(merged)
 
     return StateTable(
-        states        = new_states_ordered,
-        input_names   = stt.input_names,
-        output_names  = stt.output_names,
-        transitions   = new_transitions,
-        model         = stt.model,
-        reset_state   = rep[stt.reset_state],
-        state_outputs = new_state_outputs,
+        states            = new_states_ordered,
+        input_names       = stt.input_names,
+        output_names      = stt.output_names,
+        transitions       = new_transitions,
+        model             = stt.model,
+        reset_state       = rep[stt.reset_state],
+        state_outputs     = new_state_outputs,
+        reset_input_name  = stt.reset_input_name,
+        reset_polarity    = stt.reset_polarity,
     )
 
 
@@ -599,13 +620,15 @@ def _remove_unreachable(stt: StateTable) -> StateTable:
     new_state_outputs = {s: v for s, v in stt.state_outputs.items() if s in reach}
 
     return StateTable(
-        states        = new_states,
-        input_names   = stt.input_names,
-        output_names  = stt.output_names,
-        transitions   = new_trans,
-        model         = stt.model,
-        reset_state   = stt.reset_state,
-        state_outputs = new_state_outputs,
+        states            = new_states,
+        input_names       = stt.input_names,
+        output_names      = stt.output_names,
+        transitions       = new_trans,
+        model             = stt.model,
+        reset_state       = stt.reset_state,
+        state_outputs     = new_state_outputs,
+        reset_input_name  = stt.reset_input_name,
+        reset_polarity    = stt.reset_polarity,
     )
 
 
@@ -698,6 +721,7 @@ def fsm_to_truth_table(
     encoding:   Dict[str, Tuple[int, ...]],
     state_bit_prefix: str = 'Q',
     next_bit_prefix:  str = 'D',
+    excitation:       str  = 'd',
 ) -> Tuple[TruthTable, List[str]]:
     """
     Project an FSM onto a single combinational TruthTable.
@@ -707,8 +731,31 @@ def fsm_to_truth_table(
     Truth table inputs:
       state_bits (MSB first) ++ fsm_inputs
 
-    Truth table outputs:
+    Truth table outputs (excitation='d', default):
       next_state_bits (MSB first) ++ fsm_outputs
+
+    Truth table outputs (excitation='jk'):
+      J_0..J_{w-1} ++ K_0..K_{w-1} ++ fsm_outputs
+
+    For JK excitation the inverse excitation table of a JK flip-flop is:
+
+        Q(t)  Q(t+1)   J   K
+        ──────────────────────
+         0      0      0   DC
+         0      1      1   DC
+         1      0      DC  1
+         1      1      DC  0
+
+    i.e. J_i is a don't-care whenever the current state bit Q_i = 1, and
+    K_i is a don't-care whenever Q_i = 0.  We resolve those per-bit
+    DCs with the "T-fill" convention that makes J_i = K_i = T_i where
+    T_i = Q_i XOR Q_i(t+1) is the toggle signal: the single simplest
+    concrete choice that (a) is always correct under the JK recurrence,
+    and (b) collapses to the classic counter solution J=K=1 / J=K=Q0 on
+    binary up/down counters, which is where JK flip-flops win biggest
+    over D-flops.  Because J_i and K_i share the same function, AIG
+    structural hashing merges them automatically — the extra outputs
+    cost nothing in gates.
 
     Input patterns corresponding to unused state encodings (e.g. unused
     rows in a 3-state / 2-bit binary encoding) are emitted as don't-cares
@@ -716,16 +763,25 @@ def fsm_to_truth_table(
     whose next state is None or whose output contains DASH are likewise
     emitted with don't-care values on those bits.
     """
+    if excitation not in ('d', 'jk'):
+        raise ValueError(
+            f"excitation must be 'd' or 'jk', got {excitation!r}")
     w_state  = len(next(iter(encoding.values())))
     n_in_bit = stt.n_input_bits
     n_out    = stt.n_output_bits
+    # JK doubles the state-excitation output count (J_i + K_i per state bit).
+    w_excit  = w_state if excitation == 'd' else 2 * w_state
     n_tt_in  = w_state + n_in_bit
-    n_tt_out = w_state + n_out
+    n_tt_out = w_excit + n_out
 
     state_bit_names = [f'{state_bit_prefix}{i}' for i in range(w_state)]
-    next_bit_names  = [f'{next_bit_prefix}{i}'  for i in range(w_state)]
+    if excitation == 'd':
+        excit_names = [f'{next_bit_prefix}{i}' for i in range(w_state)]
+    else:
+        excit_names = ([f'J{i}' for i in range(w_state)] +
+                       [f'K{i}' for i in range(w_state)])
     input_names     = state_bit_names + list(stt.input_names)
-    output_names    = next_bit_names  + list(stt.output_names)
+    output_names    = excit_names     + list(stt.output_names)
 
     # Expand STT to concrete (state, input-pattern) cells
     delta, lam = _expand_stt(stt)
@@ -736,6 +792,19 @@ def fsm_to_truth_table(
 
     used_state_codes: Set[Tuple[int, ...]] = set(encoding.values())
     code_to_state: Dict[Tuple[int, ...], str] = {v: k for k, v in encoding.items()}
+
+    def _excit_bits(
+        s_bits:  Tuple[int, ...],
+        ns_bits: Tuple[int, ...],
+    ) -> Tuple[int, ...]:
+        if excitation == 'd':
+            return tuple(ns_bits)
+        # jk: T-fill — J_i = K_i = T_i = Q_i XOR next_Q_i
+        t = tuple(
+            DASH if ns_bits[i] == DASH else (s_bits[i] ^ ns_bits[i])
+            for i in range(w_state)
+        )
+        return t + t
 
     # Enumerate every (state_code, input_pattern) pair
     for scode in range(1 << w_state):
@@ -760,7 +829,7 @@ def fsm_to_truth_table(
             else:
                 next_bits = encoding[dst]
 
-            row = tuple(next_bits) + tuple(out)
+            row = _excit_bits(s_bits, next_bits) + tuple(out)
 
             # If every bit of this row is DC, mark the whole minterm DC
             if all(b == DASH for b in row):
@@ -801,7 +870,7 @@ def fsm_to_truth_table(
                 ns_bits = tuple([DASH] * w_state)
             else:
                 ns_bits = encoding[dst]
-            combined = tuple(ns_bits) + tuple(out)
+            combined = _excit_bits(s_bits, ns_bits) + tuple(out)
             for j, bit in enumerate(combined):
                 if bit == DASH:
                     per_output_dc[j].add(key_m)
@@ -850,7 +919,14 @@ class FSMResult:
     stt              : the (possibly minimized) StateTable used for synthesis.
     encoding         : state name → bit vector (MSB first).
     state_bit_names  : list of flip-flop Q wire names (e.g. ['Q0', 'Q1']).
-    next_bit_names   : list of flip-flop D wire names (e.g. ['D0', 'D1']).
+    next_bit_names   : for D excitation, list of D wire names (['D0', 'D1']).
+                       For JK excitation this is empty (the combinational
+                       cone emits J/K instead — see j_bit_names, k_bit_names).
+    j_bit_names      : JK excitation J wire names (e.g. ['J0', 'J1']); empty
+                       when excitation='d'.
+    k_bit_names      : JK excitation K wire names; empty when excitation='d'.
+    excitation       : 'd' | 'jk' — which flip-flop primitive the
+                       combinational cone is driving.
     fsm_output_names : names of the combinational FSM outputs (non-state).
     reset_code       : bit tuple loaded on power-up.
     truth_table      : the combinational projection.
@@ -861,10 +937,15 @@ class FSMResult:
         self.stt:              Optional[StateTable]          = None
         self.encoding:         Dict[str, Tuple[int, ...]]    = {}
         self.encoding_strategy: str                          = ''
+        self.excitation:       str                           = 'd'
         self.state_bit_names:  List[str]                     = []
         self.next_bit_names:   List[str]                     = []
+        self.j_bit_names:      List[str]                     = []
+        self.k_bit_names:      List[str]                     = []
         self.fsm_output_names: List[str]                     = []
         self.reset_code:       Tuple[int, ...]               = ()
+        self.reset_input_name: Optional[str]                 = None
+        self.reset_polarity:   str                           = 'sync'
         self.truth_table:      Optional[TruthTable]          = None
         self.opt_result:       Optional[OptimizeResult]      = None
 
@@ -878,11 +959,12 @@ class FSMResult:
 
 
 def synthesize_fsm(
-    stt:      StateTable,
-    encoding: str          = 'binary',
-    minimize: bool         = True,
-    verbose:  bool         = True,
-    script:   Optional[str] = None,
+    stt:        StateTable,
+    encoding:   str           = 'binary',
+    minimize:   bool          = True,
+    verbose:    bool          = True,
+    script:     Optional[str] = None,
+    excitation: str           = 'd',
 ) -> FSMResult:
     """
     Full FSM → NAND synthesis.
@@ -893,13 +975,27 @@ def synthesize_fsm(
       4. optimize() — existing combinational pipeline.
       5. Wrap in FSMResult; caller pipes flip-flops in externally
          (e.g. via export_fsm_circ).
+
+    Parameters
+    ----------
+    excitation : 'd' | 'jk'
+        Target flip-flop primitive.  'd' (default) emits one D_i next-state
+        bit per state bit.  'jk' emits (J_i, K_i) pairs using the T-fill
+        concretion (J_i = K_i = Q_i XOR next_Q_i); structural hashing then
+        merges J and K into a single shared cone.  JK typically wins on
+        counters and other toggle-heavy FSMs, and loses on shift registers.
     """
+    if excitation not in ('d', 'jk'):
+        raise ValueError(
+            f"excitation must be 'd' or 'jk', got {excitation!r}")
+
     from .pipeline import optimize
 
     if verbose:
         print(f"\n  FSM synthesis: {stt}")
         print(f"    reset     : {stt.reset_state}")
         print(f"    encoding  : {encoding}")
+        print(f"    excitation: {excitation}")
         print(f"    minimize  : {minimize}")
 
     if minimize:
@@ -910,7 +1006,7 @@ def synthesize_fsm(
 
     enc = encode_states(stt, encoding)
 
-    tt, state_bit_names = fsm_to_truth_table(stt, enc)
+    tt, state_bit_names = fsm_to_truth_table(stt, enc, excitation=excitation)
     w_state = len(state_bit_names)
 
     if verbose:
@@ -923,10 +1019,20 @@ def synthesize_fsm(
     res.stt               = stt
     res.encoding          = enc
     res.encoding_strategy = encoding
+    res.excitation        = excitation
     res.state_bit_names   = state_bit_names
-    res.next_bit_names    = [f'D{i}' for i in range(w_state)]
+    if excitation == 'd':
+        res.next_bit_names = [f'D{i}' for i in range(w_state)]
+        res.j_bit_names    = []
+        res.k_bit_names    = []
+    else:
+        res.next_bit_names = []
+        res.j_bit_names    = [f'J{i}' for i in range(w_state)]
+        res.k_bit_names    = [f'K{i}' for i in range(w_state)]
     res.fsm_output_names  = list(stt.output_names)
     res.reset_code        = enc[stt.reset_state]
+    res.reset_input_name  = stt.reset_input_name
+    res.reset_polarity    = stt.reset_polarity
     res.truth_table       = tt
     res.opt_result        = opt
     return res
@@ -939,6 +1045,7 @@ def synthesize_fsm(
 def simulate_fsm(
     fsm_result: FSMResult,
     input_seq:  List[Tuple[int, ...]],
+    reset_seq:  Optional[List[int]] = None,
 ) -> List[Tuple[str, Tuple[int, ...], Tuple[int, ...]]]:
     """
     Clock the synthesized FSM through *input_seq* and return a per-cycle trace:
@@ -950,6 +1057,15 @@ def simulate_fsm(
     to the state-bit inputs is closed *here*, not inside the combinational
     graph — so topological evaluation, verification, and every AIG pass
     never see a cycle.
+
+    reset_seq : optional list of 0/1 values parallel to ``input_seq``.  Only
+    consulted when ``fsm_result.reset_polarity`` is ``'async_low'`` or
+    ``'async_high'``.  On any cycle where the reset level is active, the
+    state bits are forced to ``fsm_result.reset_code`` *before* the
+    combinational cone is evaluated, the clock edge that would advance
+    state is suppressed, and the next cycle still starts from the reset
+    code — matching the datasheet semantics of a real asynchronous CLR
+    input (level-sensitive override of CLK).
     """
     from .nand import eval_network
 
@@ -965,8 +1081,13 @@ def simulate_fsm(
 
     # Per-output evaluator: for each wire, simulate just that wire.
     # We reuse eval_network by temporarily swapping the trailing OUTPUT gate.
+    if fsm_result.excitation == 'd':
+        excit_out_names = list(fsm_result.next_bit_names)
+    else:
+        excit_out_names = (list(fsm_result.j_bit_names)
+                           + list(fsm_result.k_bit_names))
     out_wires: List[str] = []
-    for name in fsm_result.next_bit_names + fsm_result.fsm_output_names:
+    for name in excit_out_names + fsm_result.fsm_output_names:
         r = fsm_result.opt_result.outputs.get(name)
         out_wires.append(r.out_wire if r is not None else '')
 
@@ -976,11 +1097,32 @@ def simulate_fsm(
         core.append((wire, 'OUTPUT', [wire]))
         return eval_network(core, asgn)
 
+    async_active_level: Optional[int] = None
+    if fsm_result.reset_polarity == 'async_low':
+        async_active_level = 0
+    elif fsm_result.reset_polarity == 'async_high':
+        async_active_level = 1
+    if reset_seq is not None and async_active_level is None:
+        raise ValueError(
+            "reset_seq was supplied but fsm_result.reset_polarity is "
+            f"{fsm_result.reset_polarity!r}; expected 'async_low' or "
+            "'async_high'")
+    if reset_seq is not None and len(reset_seq) != len(input_seq):
+        raise ValueError(
+            f"reset_seq length {len(reset_seq)} != input_seq length "
+            f"{len(input_seq)}")
+
     trace: List[Tuple[str, Tuple[int, ...], Tuple[int, ...]]] = []
-    for inputs in input_seq:
+    for t_idx, inputs in enumerate(input_seq):
         if len(inputs) != len(fsm_input_names):
             raise ValueError(
                 f"input vector length {len(inputs)} != {len(fsm_input_names)}")
+
+        reset_active = (async_active_level is not None
+                        and reset_seq is not None
+                        and reset_seq[t_idx] == async_active_level)
+        if reset_active:
+            state_bits = fsm_result.reset_code
 
         asgn: Dict[str, int] = {}
         for i, n in enumerate(state_bit_names):
@@ -1001,15 +1143,29 @@ def simulate_fsm(
             elif gtype == 'ONE':
                 wire_vals[name] = 1
 
-        next_state_bits = tuple(
-            wire_vals.get(out_wires[i], 0) for i in range(w))
+        if fsm_result.excitation == 'd':
+            next_state_bits = tuple(
+                wire_vals.get(out_wires[i], 0) for i in range(w))
+            fsm_out_offset = w
+        else:
+            # JK recurrence: Q(t+1) = J·~Q + ~K·Q
+            j_vals = [wire_vals.get(out_wires[i],       0) for i in range(w)]
+            k_vals = [wire_vals.get(out_wires[w + i],   0) for i in range(w)]
+            next_state_bits = tuple(
+                (j_vals[i] & (1 - state_bits[i])) |
+                ((1 - k_vals[i]) & state_bits[i])
+                for i in range(w)
+            )
+            fsm_out_offset = 2 * w
         fsm_outs = tuple(
-            wire_vals.get(out_wires[w + j], 0)
+            wire_vals.get(out_wires[fsm_out_offset + j], 0)
             for j in range(len(fsm_result.fsm_output_names)))
 
         state_name = code_to_state.get(state_bits, '?')
         trace.append((state_name, state_bits, fsm_outs))
-        state_bits = next_state_bits
+        # Async CLR is level-sensitive: while asserted, clock edges are
+        # ignored and the flip-flops stay pinned at reset_code.
+        state_bits = fsm_result.reset_code if reset_active else next_state_bits
 
     return trace
 

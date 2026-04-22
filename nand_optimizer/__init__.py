@@ -63,19 +63,32 @@ else:
     from .fraig             import fraig, fraig_stats
     from .dont_care         import dc_optimize, dc_stats
     from .balance           import balance_aig, aig_depth
+    from .sta               import STAResult, TimingEntry, sta_aig, sta_nand, compute_sta
+    from .switching         import SwitchingActivity, estimate_switching
     from .exact_synthesis   import (exact_synthesize, evaluate_template,
                                     exact_cache_stats, exact_cache_clear)
     from .circ_export       import export_circ, export_fsm_circ
     from .dot_export        import aig_to_dot
-    from .verify            import miter_verify
+    from .aiger_io          import write_aiger, read_aiger
+    from .blif_io           import write_blif, read_blif
+    from .verify            import miter_verify, bmc_verify
+    from .atpg              import run_atpg, AtpgResult, FaultResult
     from .tests             import run_tests
     from .profile           import ProfileReport, profile_pass
     from .benchmark_runner  import run_benchmarks, run_one_benchmark, BENCHMARKS
+    from .epfl_bench        import (run_epfl, run_one_epfl,
+                                    check_epfl_updates, aig_equivalence)
     from .property_tests    import run_property_tests, check_equivalence
     from .fsm               import (StateTable, Transition, FSMResult,
                                     minimize_states, encode_states,
                                     fsm_to_truth_table, synthesize_fsm,
                                     simulate_fsm, parse_kiss)
+    from .structural        import StructuralModule
+    from .script            import (ScriptBandit, run_bandit,
+                                    DEFAULT_ARMS, DEFAULT_SCRIPT,
+                                    parse_script, run_script)
+    from .verilog_io        import (read_verilog, parse_verilog,
+                                    verilog_to_module, VerilogError)
 
     __all__ = [
         # core pipeline
@@ -97,22 +110,36 @@ else:
         'fraig', 'fraig_stats',
         'dc_optimize', 'dc_stats',
         'balance_aig', 'aig_depth',
+        'STAResult', 'TimingEntry', 'sta_aig', 'sta_nand', 'compute_sta',
+        'SwitchingActivity', 'estimate_switching',
         'exact_synthesize', 'evaluate_template',
         'exact_cache_stats', 'exact_cache_clear',
         # export
         'export_circ', 'export_fsm_circ', 'aig_to_dot',
+        # AIGER / BLIF interchange
+        'write_aiger', 'read_aiger', 'write_blif', 'read_blif',
         # FSM synthesis (Phase 3)
         'StateTable', 'Transition', 'FSMResult',
         'minimize_states', 'encode_states', 'fsm_to_truth_table',
         'synthesize_fsm', 'simulate_fsm', 'parse_kiss',
         # verification
-        'miter_verify',
+        'miter_verify', 'bmc_verify',
+        # ATPG
+        'run_atpg', 'AtpgResult', 'FaultResult',
         # test suites
         'run_tests',
         # benchmarks
         'run_benchmarks', 'run_one_benchmark', 'BENCHMARKS',
+        'run_epfl', 'run_one_epfl', 'check_epfl_updates', 'aig_equivalence',
         # property-based testing
         'run_property_tests', 'check_equivalence',
         # profiling
         'ProfileReport', 'profile_pass',
+        # structural module (Phase 3.5)
+        'StructuralModule',
+        # synthesis script + bandit
+        'ScriptBandit', 'run_bandit', 'DEFAULT_ARMS', 'DEFAULT_SCRIPT',
+        'parse_script', 'run_script',
+        # Verilog front-end
+        'read_verilog', 'parse_verilog', 'verilog_to_module', 'VerilogError',
     ]

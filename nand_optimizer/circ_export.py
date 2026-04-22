@@ -52,6 +52,11 @@ class _DecoderBuilder:
         self.builder = result.builder
         self._lines: List[str] = []
         self._depth: Dict[str, int] = {}
+        # Hierarchical results have no truth_table; derive input names from the AIG.
+        if self.tt is not None:
+            self._input_names: List[str] = list(self.tt.input_names)
+        else:
+            self._input_names = result.aig.input_names()
 
     def _comp(self, lib: int, x: int, y: int, name: str,
               attrs: Dict[str, str] | None = None):
@@ -68,7 +73,7 @@ class _DecoderBuilder:
                 f'    <wire from="({x1},{y1})" to="({x2},{y2})"/>')
 
     def _compute_depths(self):
-        for n in self.tt.input_names:
+        for n in self._input_names:
             self._depth[n] = -1
         for gn, gt, ins in self.builder.gates:
             if gt in ('ZERO', 'ONE'):
@@ -81,7 +86,7 @@ class _DecoderBuilder:
         self._compute_depths()
 
         # ── input pins ────────────────────────────────────────────────
-        for i, name in enumerate(self.tt.input_names):
+        for i, name in enumerate(self._input_names):
             py = _snap(_MARGIN_Y + i * _ROW_SPACE)
             self._comp(0, _INPUT_X, py, 'Pin', {
                 'appearance':  'classic',
@@ -99,7 +104,7 @@ class _DecoderBuilder:
         for gn, gt, _ in self.builder.gates:
             if gt not in ('ZERO', 'ONE'):
                 continue
-            py = _snap(_MARGIN_Y + (len(self.tt.input_names) + ci) * _ROW_SPACE)
+            py = _snap(_MARGIN_Y + (len(self._input_names) + ci) * _ROW_SPACE)
             ci += 1
             val = '0x1' if gt == 'ONE' else '0x0'
             self._comp(0, _INPUT_X, py, 'Constant', {'value': val})
@@ -159,11 +164,21 @@ class _DecoderBuilder:
         max_d = max(self._depth.values(), default=0)
         out_x = _snap(_GATE_X0 + (max_d + 1) * _COL_SPACE)
 
-        for i, (name, r) in enumerate(self.result.outputs.items()):
+        # Regular optimize() fills result.outputs; hierarchical_optimize() leaves
+        # it empty — fall back to extracting (name, wire) from OUTPUT gates.
+        if self.result.outputs:
+            output_pairs = [(name, r.out_wire)
+                            for name, r in self.result.outputs.items()]
+        else:
+            output_pairs = [(gn, gi[0])
+                            for gn, gt, gi in self.builder.gates
+                            if gt == 'OUTPUT']
+
+        for i, (name, out_wire) in enumerate(output_pairs):
             py = _snap(_MARGIN_Y + i * _ROW_SPACE)
             tx = out_x - 40
             self._comp(0, tx, py, 'Tunnel', {
-                'facing': 'east', 'label': r.out_wire,
+                'facing': 'east', 'label': out_wire,
             })
             self._wire(tx, py, out_x, py)
             self._comp(0, out_x, py, 'Pin', {
@@ -352,9 +367,14 @@ def export_circ(result: OptimizeResult, path: str,
     with open(path, 'w', encoding='utf-8') as f:
         f.write(xml)
 
-    print(f'  Exported {path}  '
-          f'({nand_gate_count(result.builder.gates)} NAND gates, '
-          f'{tt.n_inputs} inputs, {tt.n_outputs} outputs)')
+    n_nand = nand_gate_count(result.builder.gates)
+    if tt is not None:
+        n_in  = tt.n_inputs
+        n_out = tt.n_outputs
+    else:
+        n_in  = len(result.aig.input_names()) if result.aig is not None else '?'
+        n_out = sum(1 for _, gt, _ in result.builder.gates if gt == 'OUTPUT')
+    print(f'  Exported {path}  ({n_nand} NAND gates, {n_in} inputs, {n_out} outputs)')
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -362,19 +382,31 @@ def export_circ(result: OptimizeResult, path: str,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def export_fsm_circ(fsm_result, path: str,
-                    circuit_name: str = 'fsm_core') -> None:
+                    circuit_name: str = 'fsm_core',
+                    flipflop: str = 'auto') -> None:
     """
     Export a synthesized FSM to a Logisim Evolution .circ file.
 
     Structure:
       • Sub-circuit ``<circuit_name>`` — the combinational cone, identical
         to ``export_circ`` output: state bits and FSM inputs enter as Pin
-        components; next-state bits and FSM outputs leave as Pin components.
+        components; excitation bits (D or J/K) and FSM outputs leave as
+        Pin components.
       • Main circuit — instantiates the sub-circuit once, inserts one
-        Logisim D_FF per state bit, wires next-state pins (D) through the
-        flip-flops back to state-bit pins (Q), and connects a shared Clock
-        driver.  FSM inputs become top-level input Pins; FSM outputs become
-        top-level output Pins.
+        Logisim flip-flop per state bit, wires the excitation pins through
+        the flip-flops back to state-bit pins (Q), and connects a shared
+        Clock driver.  FSM inputs become top-level input Pins; FSM outputs
+        become top-level output Pins.
+
+    Parameters
+    ----------
+    flipflop : 'd' | 'jk' | 'auto'
+        Flip-flop primitive to use in the harness.  'auto' (default) picks
+        the primitive that matches the FSMResult's excitation strategy: a
+        D_FF when excitation='d', a JK_FF when excitation='jk'.  Explicit
+        'd' / 'jk' overrides are rejected if they would contradict the
+        synthesized cone, since the combinational outputs must match the
+        flip-flop's input protocol.
 
     Reset behaviour: flip-flops power up to 0, which corresponds to the
     reset_state under the 'binary' and 'gray' encodings (see encode_states).
@@ -384,6 +416,17 @@ def export_fsm_circ(fsm_result, path: str,
 
     if not isinstance(fsm_result, FSMResult):
         raise TypeError("export_fsm_circ expects an FSMResult")
+
+    if flipflop == 'auto':
+        flipflop = fsm_result.excitation
+    if flipflop not in ('d', 'jk'):
+        raise ValueError(
+            f"flipflop must be 'd', 'jk', or 'auto', got {flipflop!r}")
+    if flipflop != fsm_result.excitation:
+        raise ValueError(
+            f"flipflop={flipflop!r} does not match FSMResult.excitation="
+            f"{fsm_result.excitation!r}; re-synthesize with a matching "
+            f"excitation= argument to synthesize_fsm()")
 
     opt_result = fsm_result.opt_result
     tt         = opt_result.truth_table
@@ -407,10 +450,18 @@ def export_fsm_circ(fsm_result, path: str,
         comp(0, x, y, 'Tunnel', {'facing': facing, 'label': label})
 
     state_bits  = fsm_result.state_bit_names
-    next_bits   = fsm_result.next_bit_names
     fsm_inputs  = fsm_result.stt.input_names
     fsm_outputs = fsm_result.fsm_output_names
     n_state     = len(state_bits)
+
+    # Async reset tract: bypass the combinational cone and land directly on
+    # the CLR pin of every flip-flop.  Logisim's Memory-library flip-flops
+    # treat the CLR pin as active-high asynchronous clear, so for
+    # 'async_low' we invert the user's signal through a NAND-tied inverter
+    # before distributing it on the shared CLR tunnel.
+    async_reset   = fsm_result.reset_polarity in ('async_low', 'async_high')
+    reset_pin     = fsm_result.reset_input_name
+    reset_tunnel  = '__CLR__' if async_reset else None
 
     # Layout
     core_x, core_y = 500, 100
@@ -427,6 +478,37 @@ def export_fsm_circ(fsm_result, path: str,
     comp(0, clock_x, clock_y, 'Clock', {'appearance': 'NewPins'})
     tun(clock_x, clock_y, 'east', 'CLK')
 
+    # Async reset pin (if requested) — routed directly to the shared CLR
+    # tunnel, never entering the combinational excitation cone.
+    if async_reset:
+        reset_px = clock_x
+        reset_py = clock_y + 60
+        comp(0, reset_px, reset_py, 'Pin', {
+            'appearance': 'classic',
+            'label':      reset_pin,
+            'labelfont':  'SansSerif bold 14',
+        })
+        if fsm_result.reset_polarity == 'async_high':
+            # Direct: user's active-high signal matches Logisim's CLR.
+            tun(reset_px + 40, reset_py, 'west', reset_tunnel)
+            wire(reset_px, reset_py, reset_px + 40, reset_py)
+        else:
+            # async_low: invert via a NAND-tied-inputs, then distribute.
+            inv_x = reset_px + 80
+            wire(reset_px, reset_py, inv_x - _GATE_REAL_SIZE, reset_py)
+            comp(1, inv_x, reset_py, 'NAND Gate', {
+                'size':   str(_GATE_SIZE),
+                'inputs': '2',
+                'label':  'RESET_INV',
+            })
+            # Tie both NAND inputs to the reset pin
+            wire(inv_x - _GATE_REAL_SIZE, reset_py,
+                 inv_x - _GATE_REAL_SIZE, reset_py - 10)
+            wire(inv_x - _GATE_REAL_SIZE, reset_py,
+                 inv_x - _GATE_REAL_SIZE, reset_py + 10)
+            tun(inv_x + 10, reset_py, 'west', reset_tunnel)
+            wire(inv_x, reset_py, inv_x + 10, reset_py)
+
     # Sub-circuit instance
     comp(-1, core_x, core_y, circuit_name, {})
 
@@ -440,21 +522,50 @@ def export_fsm_circ(fsm_result, path: str,
         })
         tun(fsm_in_x + 40, py, 'west', name)
 
-    # D flip-flops — one per state bit
-    for i, (d_wire, q_wire) in enumerate(zip(next_bits, state_bits)):
-        fy = ff_row_y + i * ff_spacing
-        # Tunnel D-input coming from sub-circuit output
-        tun(ff_x - 60, fy, 'east', d_wire)
-        wire(ff_x - 60, fy, ff_x - 30, fy)
-        # D Flip-Flop component (Logisim Memory library = lib 4)
-        comp(4, ff_x, fy, 'D Flip-Flop', {
-            'appearance': 'logisim_evolution',
-            'label':      q_wire,
-        })
-        # Clock tunnel on the FF
-        tun(ff_x - 10, fy + 20, 'north', 'CLK')
-        # Q-output tunnel feeds the state-bit wire back into the combinational cone
-        tun(ff_x + 30, fy, 'west', q_wire)
+    # Flip-flops — one per state bit
+    if flipflop == 'd':
+        for i, (d_wire, q_wire) in enumerate(
+                zip(fsm_result.next_bit_names, state_bits)):
+            fy = ff_row_y + i * ff_spacing
+            # Tunnel D-input coming from sub-circuit output
+            tun(ff_x - 60, fy, 'east', d_wire)
+            wire(ff_x - 60, fy, ff_x - 30, fy)
+            # D Flip-Flop component (Logisim Memory library = lib 4)
+            comp(4, ff_x, fy, 'D Flip-Flop', {
+                'appearance': 'logisim_evolution',
+                'label':      q_wire,
+            })
+            # Clock tunnel on the FF
+            tun(ff_x - 10, fy + 20, 'north', 'CLK')
+            # Q-output tunnel feeds the state-bit wire back into the cone
+            tun(ff_x + 30, fy, 'west', q_wire)
+            # Async CLR tunnel: shared control tract, routed to the south
+            # side of the FF (where Logisim Evolution places the CLR pin).
+            if async_reset:
+                tun(ff_x - 30, fy + 20, 'north', reset_tunnel)
+    else:  # jk
+        for i, (j_wire, k_wire, q_wire) in enumerate(zip(
+                fsm_result.j_bit_names,
+                fsm_result.k_bit_names,
+                state_bits)):
+            fy = ff_row_y + i * ff_spacing
+            # Tunnel J-input (upper) and K-input (lower) from sub-circuit
+            tun(ff_x - 60, fy - 10, 'east', j_wire)
+            wire(ff_x - 60, fy - 10, ff_x - 30, fy - 10)
+            tun(ff_x - 60, fy + 10, 'east', k_wire)
+            wire(ff_x - 60, fy + 10, ff_x - 30, fy + 10)
+            # J-K Flip-Flop component (Logisim Memory library = lib 4)
+            comp(4, ff_x, fy, 'J-K Flip-Flop', {
+                'appearance': 'logisim_evolution',
+                'label':      q_wire,
+            })
+            # Clock tunnel on the FF
+            tun(ff_x - 10, fy + 20, 'north', 'CLK')
+            # Q-output tunnel feeds the state-bit wire back into the cone
+            tun(ff_x + 30, fy, 'west', q_wire)
+            # Async CLR tunnel (see D-FF branch above)
+            if async_reset:
+                tun(ff_x - 30, fy + 20, 'north', reset_tunnel)
 
     # Outputs (FSM output bits) — routed via tunnels from sub-circuit
     for i, name in enumerate(fsm_outputs):
@@ -526,6 +637,12 @@ def export_fsm_circ(fsm_result, path: str,
         f.write(xml)
 
     n_nand = nand_gate_count(opt_result.builder.gates)
+    ff_label = 'D' if flipflop == 'd' else 'JK'
+    reset_note = ''
+    if async_reset:
+        reset_note = (f', async-{fsm_result.reset_polarity.split("_")[1]} '
+                      f'reset on {reset_pin!r}')
     print(f'  Exported FSM {path}  '
-          f'({n_nand} NAND gates + {n_state} D flip-flops, '
-          f'{len(fsm_inputs)} inputs, {len(fsm_outputs)} outputs)')
+          f'({n_nand} NAND gates + {n_state} {ff_label} flip-flops, '
+          f'{len(fsm_inputs)} inputs, {len(fsm_outputs)} outputs'
+          f'{reset_note})')

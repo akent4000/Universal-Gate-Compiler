@@ -18,11 +18,15 @@ StateTable / KISS2 FSM ─────────────┤ (excitation lo
     ├─[3] Algebraic Factorization       — Brayton kernel/co-kernel extraction
     ├─[4] Cross-output Factorization    — expose shared literals across outputs
     ├─[5] Functional Decomposition      — Ashenhurst-Curtis / Roth-Karp bipartition
+    ├─[3.5] Shared-Support Decomposition — joint column-multiplicity bus across outputs
     ├─[6] AIG Construction              — structural hashing (And-Inverter Graph)
     │        └─ Greedy Reassociation    — reorder AND-chains for cache reuse
     ├─[7]  AIG Rewriting                — fanout-aware MFFC cut rewriting
     │        └─ Exact Synthesis (SAT)   — Z3-based optimal 4-cut templates
+    ├─[7.3] Bi-Decomposition             — disjoint-support AND/OR/XOR split (k=5..8)
+    ├─[7.4] BDD-guided Rebuild          — per-output ROBDD + sifting reorder
     ├─[7.5] FRAIGing                    — simulation + SAT equivalence merging
+    ├─[7.6] SAT Resubstitution          — functional dependency test for k=5..7 cuts
     ├─[7.7] Don't-Care Optimization     — SDC + sim-based ODC (Mishchenko 2009)
     │        ├─ DC-aware NPN lookup     — care-mask padding into AIG_DB_4
     │        ├─ Window resubstitution   — 0-gate / 1-gate drop-in replacement
@@ -102,6 +106,25 @@ python -m nand_optimizer fsm                    # run every built-in FSM
 python -m nand_optimizer path/to/fsm.kiss2      # import KISS2 file
 python -m nand_optimizer fsm:mod4 --excitation jk --encoding gray --circ mod4.circ
 
+# Hierarchical (multi-stage) synthesis via JSON composition spec
+python -m nand_optimizer --compose myPLAfiles/bcd_7seg_composition.json --circ bcd7seg.circ
+
+# Auto-detect symmetric output groups in a PLA and synthesize hierarchically
+python -m nand_optimizer myPLAfiles/Binary_to_7seg_0-99.pla --auto-compose --verify
+
+# Bandit-guided synthesis (UCB1 / Thompson Sampling)
+python -m nand_optimizer mult4 --bandit 20
+python -m nand_optimizer rd53  --bandit 30 --bandit-strategy thompson
+
+# Structural JK counter example (Phase 3.5, --bits chooses width)
+python -m nand_optimizer jkcounter --bits 8 --circ counter8.circ
+
+# Bounded Model Checking for FSMs (K clock cycles, Z3-backed)
+python -m nand_optimizer fsm:seq101 --bmc-bound 16
+
+# ATPG stuck-at fault coverage (SAT-based test pattern generation)
+python -m nand_optimizer 7seg --atpg
+
 # Flags
 python -m nand_optimizer 7seg --quiet                  # suppress verbose logs
 python -m nand_optimizer 7seg --circ output.circ       # export to Logisim
@@ -111,7 +134,9 @@ python -m nand_optimizer 7seg --aiger output.aag       # ASCII AIGER 1.9
 python -m nand_optimizer 7seg --blif  output.blif      # Berkeley BLIF (combinational)
 python -m nand_optimizer 7seg --verify                 # miter-based SAT verification
 python -m nand_optimizer 7seg --profile                # per-pass time + memory
+python -m nand_optimizer 7seg --atpg                   # stuck-at ATPG (SAT miter)
 python -m nand_optimizer 7seg --script "balance; rewrite; fraig; dc; balance; rewrite"
+python -m nand_optimizer 7seg --bandit 20              # MAB-guided pass selection
 ```
 
 ---
@@ -145,6 +170,9 @@ python -m nand_optimizer mult4 --script "rewrite; fraig; dc -r 3 --dc-exact --od
 | `refactor` | Alias for `rewrite` |
 | `fraig`    | Merge functionally equivalent nodes (simulation + SAT) |
 | `dc`       | Don't-care-aware rewriting (SDC + sim-based ODC, window resub, DC-masked exact synthesis) |
+| `bidec`    | Disjoint-support bi-decomposition `f = g(X) op h(Y)` for AND/OR/XOR (k=5..8 cuts) |
+| `bdd`      | Per-output ROBDD rebuild + sifting reorder + ITE realisation (requires `dd`) |
+| `resub`    | SAT-style functional resubstitution with up to 3 divisors for wide cuts (k=5..7) |
 
 ### Flags for `rewrite` / `refactor`
 
@@ -159,7 +187,6 @@ python -m nand_optimizer mult4 --script "rewrite; fraig; dc -r 3 --dc-exact --od
 | Flag | Meaning | Default |
 |---|---|---|
 | `-K N`        | Cut size (max leaves per cut) | 4 |
-| `-D N`        | DC propagation depth | pipeline default |
 | `-T N`        | Z3 timeout per miter, ms | — |
 | `-W N`        | Resubstitution window size | 64 |
 | `-r N`        | Iterative DC rounds (early-exit on no progress) | 1 |
@@ -169,6 +196,19 @@ python -m nand_optimizer mult4 --script "rewrite; fraig; dc -r 3 --dc-exact --od
 | `--dc-exact`  | Fall back to DC-masked exact synthesis for cuts > 4 | off |
 | `--no-resub`  | Disable 0-gate / 1-gate window resubstitution | off |
 
+### Flags for `bidec` / `bdd` / `resub`
+
+| Command | Flag | Meaning | Default |
+|---|---|---|---|
+| `bidec` | `-K N` / `-k N` | Max / min cut size | 8 / 5 |
+| `bidec` | `-r N`          | Rounds | 1 |
+| `bidec` | `-z`            | SAT exact synthesis for halves with >4 inputs | off |
+| `bdd`   | `-K N`          | Max support size per output | 16 |
+| `resub` | `-K N` / `-k N` | Max / min cut size | 7 / 5 |
+| `resub` | `-M N`          | Max divisors in dependency test | 3 |
+| `resub` | `-D N`          | Divisor pool cap | 20 |
+| `resub` | `-r N`          | Rounds | 1 |
+
 ### Python API
 
 ```python
@@ -176,6 +216,93 @@ result = optimize(tt, script="balance; rewrite; fraig; dc -r 3 --odc; balance; r
 ```
 
 When `script=None` (default), the built-in `"rewrite; fraig; dc; rewrite; balance"` sequence runs unchanged.
+
+---
+
+## Bandit-Guided Synthesis
+
+Instead of a hand-tuned script, let a Multi-Armed Bandit pick the next pass
+adaptively. Each arm is a single-command script (`balance`, `rewrite`,
+`rewrite -z`, `fraig`, `dc`); reward is the fractional AIG-node reduction
+`(n_before - n_after) / n_before` observed after the step. Implemented in
+[nand_optimizer/script.py](nand_optimizer/script.py) as `ScriptBandit` with
+**UCB1** (default) and **Thompson Sampling** strategies.
+
+```bash
+# CLI: 20-step horizon, UCB1
+python -m nand_optimizer mult4 --bandit 20
+
+# Thompson Sampling on rd53
+python -m nand_optimizer rd53 --bandit 30 --bandit-strategy thompson
+```
+
+```python
+from nand_optimizer import optimize, run_bandit, ScriptBandit, DEFAULT_ARMS
+
+# Directly from optimize()
+result = optimize(tt, bandit_horizon=20, bandit_strategy='ucb1')
+
+# Or orchestrate a standalone bandit session
+trace = run_bandit(aig, out_lits, horizon=30, strategy='thompson')
+```
+
+`--bandit HORIZON` overrides `--script`. Custom arm lists are accepted via the
+Python API (`ScriptBandit(arms=[...])`); the default set is `DEFAULT_ARMS`.
+
+---
+
+## Hierarchical / Multi-Stage Synthesis
+
+For circuits that factor naturally into sequential stages (binary → BCD →
+7-seg, address decoders, FSM look-ahead tables), the compiler accepts a
+**composition spec** that wires together multiple independently-synthesized
+stages into one shared AIG:
+
+```bash
+python -m nand_optimizer --compose myPLAfiles/bcd_7seg_composition.json \
+                        --circ bcd_7seg.circ --verify
+```
+
+Each stage is a `.pla` plus a `connect` map binding its inputs to outputs of
+earlier stages. `hierarchical_optimize()` in
+[nand_optimizer/pipeline.py](nand_optimizer/pipeline.py) optimizes each stage
+once, composes them via `AIG.compose()` (substituting shared signals), GCs
+the combined AIG, then runs `rewrite; fraig; balance; rewrite -z; fraig;
+balance` over the whole network. Cross-stage sub-expressions are automatically
+merged by structural hashing.
+
+**Auto-composition** — `--auto-compose` inspects a `.pla`, detects symmetric
+output groups that implement the *same* function through different
+intermediate signals, synthesizes an intermediate bus, and runs hierarchical
+synthesis automatically. Module: [nand_optimizer/auto_compose.py](nand_optimizer/auto_compose.py).
+
+```bash
+python -m nand_optimizer myPLAfiles/Binary_to_7seg_0-99.pla \
+                        --auto-compose --verify --circ bin7seg.circ
+```
+
+---
+
+## Bounded Model Checking (FSM)
+
+For synthesized FSMs, `--bmc-bound K` unrolls the sequential network for K
+clock cycles symbolically via Z3 and miters it against the reference
+`StateTable`. UNSAT proves no divergence on any input sequence of length ≤ K;
+a SAT witness pinpoints the first divergence cycle with an input trace.
+Implemented in [nand_optimizer/verify.py](nand_optimizer/verify.py) as
+`bmc_verify()`.
+
+```bash
+python -m nand_optimizer fsm:seq101 --bmc-bound 16
+python -m nand_optimizer path/to/fsm.kiss2 --bmc-bound 12 --encoding gray
+```
+
+```python
+from nand_optimizer import synthesize_fsm, bmc_verify
+res = synthesize_fsm(stt, encoding='binary')
+v   = bmc_verify(res, bound=20)
+# v['equivalent'] → True / False / None; v['counterexample'] → step + inputs + states
+```
 
 ---
 
@@ -340,12 +467,18 @@ print(val)  # → 1
 ### Formal verification
 
 ```python
-from nand_optimizer.verify import miter_verify
+from nand_optimizer.verify import miter_verify, bmc_verify
 
+# Combinational: SAT miter (Z3) with exhaustive fallback for n ≤ 20
 v = miter_verify(tt, result)
 # v['equivalent'] → True / False / None
 # v['method']     → 'z3' | 'exhaustive'
 # v['counterexample'] → None or {input: value, ...}
+
+# Sequential (FSM): K-cycle Bounded Model Checking
+v = bmc_verify(fsm_result, bound=16)
+# v['equivalent'] → True (UNSAT proves no divergence ≤ K)
+# v['counterexample'] → None or {'step': t, 'inputs': [...], 'states': [...]}
 ```
 
 ### Export to Logisim Evolution
@@ -445,17 +578,21 @@ nand_optimizer/
 ├── exact_synthesis.py   # SAT-based exact synthesis (Z3, up to 5–6-input cuts)
 ├── fraig.py             # FRAIGing — simulation + SAT equivalence merging
 ├── dont_care.py         # Don't-care-aware rewrite (SDC + sim-based ODC, V2)
+├── bidec.py             # Disjoint-support bi-decomposition (AND/OR/XOR, k=5..8)
+├── bdd_decomp.py        # ROBDD rebuild via sifting + ITE realisation (needs `dd`)
+├── sat_resub.py         # Functional resubstitution for wide cuts (dc2-style)
+├── auto_compose.py      # Symmetric-output detection + hierarchical spec generator
 ├── balance.py           # AIG depth balancing (area-preserving)
-├── script.py            # Synthesis script parser and executor
+├── script.py            # Synthesis script parser + executor + ScriptBandit (UCB1 / Thompson)
 ├── aig_db_4.py          # Precomputed 4-input NPN template DB (auto-generated, gitignored)
 ├── precompute_4cut.py   # Parallel generator for aig_db_4.py
 ├── nand.py              # NANDBuilder — final NAND network + XOR/XNOR extraction
-├── pipeline.py          # Full multi-output pipeline (optimize())
+├── pipeline.py          # Full multi-output pipeline (optimize() + hierarchical_optimize())
 ├── fsm.py               # StateTable, Hopcroft + IS-FSM minimisation, state encoding,
 │                        # excitation logic, D/JK flip-flop backend, KISS2 parser
 ├── structural.py        # StructuralModule — gate-level RTL construction (no TruthTable)
 ├── datapath.py          # Parametric datapath blocks (adders, comparators, mux)
-├── verify.py            # Miter-based formal equivalence check (Z3 / exhaustive)
+├── verify.py            # Miter + BMC formal equivalence (Z3 / exhaustive / bounded unroll)
 ├── tests.py             # Universal test suite (T1–T10)
 ├── benchmark_runner.py  # MCNC regression runner
 ├── property_tests.py    # Hypothesis-based random equivalence tests
@@ -496,7 +633,7 @@ nand_optimizer/
 
 **Synthesis scripts** — steps 7–8 (rewrite, FRAIG, DC, balance) are fully composable via a user-supplied semicolon-separated command string, enabling circuit-specific tuning of the optimisation sequence without modifying pipeline code.
 
-**Don't-care optimisation (Mishchenko 2009)** — sound sim-based ODC propagation with three safety layers: per-cut admissibility check (template signature ≡ reference on cared bits), reconstruction-from-old fallback, and end-of-pass safety-net miter. Window resubstitution (0-gate / 1-gate) and DC-masked exact synthesis extend coverage beyond the 4-input NPN database.
+**Don't-care optimisation (Mishchenko 2009)** — sound sim-based ODC propagation with three safety layers: per-cut admissibility check (template signature ≡ reference on cared bits), reconstruction-from-old fallback, and end-of-pass safety-net miter. Window resubstitution (0-gate / 1-gate) and DC-masked exact synthesis extend coverage beyond the 4-input NPN database. For `n_inputs ≤ 14` the admissibility check uses exhaustive PI enumeration (all `2^n_inputs` patterns), giving perfect per-node coverage; above the threshold random bit-parallel sampling is used. The `last_dc_stats()` API surfaces per-pass instrumentation (`n_nodes_rewritten`, `n_templates_admitted`, `n_resub_{0,1}gate`, `n_safety_net_reverts`, `final_sim_W`, `n_inputs`) for diagnostic use.
 
 **FSM-to-AIG via excitation logic** — a `StateTable` is projected to a `TruthTable` with inputs `Q_i ++ fsm_inputs` and outputs `D_i ++ fsm_outputs` (or `(J_i, K_i)` pairs for JK mode); unused-encoding patterns and DASH cubes become per-output don't-cares, giving Espresso / factorization maximum freedom. Feedback loops are broken by construction: the combinational cone is always acyclic, and `D → FF → Q` is closed only in the exporter.
 
