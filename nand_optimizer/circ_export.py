@@ -355,3 +355,177 @@ def export_circ(result: OptimizeResult, path: str,
     print(f'  Exported {path}  '
           f'({nand_gate_count(result.builder.gates)} NAND gates, '
           f'{tt.n_inputs} inputs, {tt.n_outputs} outputs)')
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FSM export — combinational cone + D flip-flops + clock
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def export_fsm_circ(fsm_result, path: str,
+                    circuit_name: str = 'fsm_core') -> None:
+    """
+    Export a synthesized FSM to a Logisim Evolution .circ file.
+
+    Structure:
+      • Sub-circuit ``<circuit_name>`` — the combinational cone, identical
+        to ``export_circ`` output: state bits and FSM inputs enter as Pin
+        components; next-state bits and FSM outputs leave as Pin components.
+      • Main circuit — instantiates the sub-circuit once, inserts one
+        Logisim D_FF per state bit, wires next-state pins (D) through the
+        flip-flops back to state-bit pins (Q), and connects a shared Clock
+        driver.  FSM inputs become top-level input Pins; FSM outputs become
+        top-level output Pins.
+
+    Reset behaviour: flip-flops power up to 0, which corresponds to the
+    reset_state under the 'binary' and 'gray' encodings (see encode_states).
+    One-hot reset requires an explicit preset; this is left to the user.
+    """
+    from .fsm import FSMResult  # local import to avoid cycles
+
+    if not isinstance(fsm_result, FSMResult):
+        raise TypeError("export_fsm_circ expects an FSMResult")
+
+    opt_result = fsm_result.opt_result
+    tt         = opt_result.truth_table
+    decoder_xml = _DecoderBuilder(opt_result).build()
+
+    # ── harness: flip-flops + feedback + input/output pins ────────────────
+    lines: List[str] = []
+
+    def comp(lib, x, y, name, attrs=None):
+        parts = [f'    <comp lib="{lib}" loc="({x},{y})" name="{name}">']
+        for k, v in (attrs or {}).items():
+            parts.append(f'      <a name="{k}" val="{v}"/>')
+        parts.append('    </comp>')
+        lines.append('\n'.join(parts))
+
+    def wire(x1, y1, x2, y2):
+        if (x1, y1) != (x2, y2):
+            lines.append(f'    <wire from="({x1},{y1})" to="({x2},{y2})"/>')
+
+    def tun(x, y, facing, label):
+        comp(0, x, y, 'Tunnel', {'facing': facing, 'label': label})
+
+    state_bits  = fsm_result.state_bit_names
+    next_bits   = fsm_result.next_bit_names
+    fsm_inputs  = fsm_result.stt.input_names
+    fsm_outputs = fsm_result.fsm_output_names
+    n_state     = len(state_bits)
+
+    # Layout
+    core_x, core_y = 500, 100
+    clock_x, clock_y = 120, 80
+    ff_x = 300
+    ff_row_y = 180
+    ff_spacing = 80
+    fsm_in_x = 120
+    fsm_in_y = 200
+    fsm_out_x = 800
+    fsm_out_y = 200
+
+    # Clock
+    comp(0, clock_x, clock_y, 'Clock', {'appearance': 'NewPins'})
+    tun(clock_x, clock_y, 'east', 'CLK')
+
+    # Sub-circuit instance
+    comp(-1, core_x, core_y, circuit_name, {})
+
+    # Primary inputs (FSM input bits) — routed via tunnels into the sub-circuit
+    for i, name in enumerate(fsm_inputs):
+        py = fsm_in_y + i * 40
+        comp(0, fsm_in_x, py, 'Pin', {
+            'appearance': 'classic',
+            'label':      name,
+            'labelfont':  'SansSerif bold 14',
+        })
+        tun(fsm_in_x + 40, py, 'west', name)
+
+    # D flip-flops — one per state bit
+    for i, (d_wire, q_wire) in enumerate(zip(next_bits, state_bits)):
+        fy = ff_row_y + i * ff_spacing
+        # Tunnel D-input coming from sub-circuit output
+        tun(ff_x - 60, fy, 'east', d_wire)
+        wire(ff_x - 60, fy, ff_x - 30, fy)
+        # D Flip-Flop component (Logisim Memory library = lib 4)
+        comp(4, ff_x, fy, 'D Flip-Flop', {
+            'appearance': 'logisim_evolution',
+            'label':      q_wire,
+        })
+        # Clock tunnel on the FF
+        tun(ff_x - 10, fy + 20, 'north', 'CLK')
+        # Q-output tunnel feeds the state-bit wire back into the combinational cone
+        tun(ff_x + 30, fy, 'west', q_wire)
+
+    # Outputs (FSM output bits) — routed via tunnels from sub-circuit
+    for i, name in enumerate(fsm_outputs):
+        py = fsm_out_y + i * 40
+        tun(fsm_out_x - 40, py, 'east', name)
+        comp(0, fsm_out_x, py, 'Pin', {
+            'appearance': 'classic',
+            'facing':     'west',
+            'type':       'output',
+            'label':      name,
+            'labelfont':  'SansSerif bold 14',
+        })
+
+    harness_xml = '\n'.join(lines)
+
+    xml = f'''<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<project source="4.1.0" version="1.0">
+  This file is intended to be loaded by Logisim-evolution v4.1.0(https://github.com/logisim-evolution/).
+
+  <lib desc="#Wiring" name="0">
+    <tool name="Pin">
+      <a name="appearance" val="classic"/>
+    </tool>
+  </lib>
+  <lib desc="#Gates" name="1"/>
+  <lib desc="#Base" name="2"/>
+  <lib desc="#Plexers" name="3"/>
+  <lib desc="#Memory" name="4"/>
+  <main name="main"/>
+  <options>
+    <a name="gateUndefined" val="ignore"/>
+    <a name="simlimit" val="1000"/>
+    <a name="simrand" val="0"/>
+  </options>
+  <mappings>
+    <tool lib="2" map="Button2" name="Menu Tool"/>
+    <tool lib="2" map="Button3" name="Menu Tool"/>
+    <tool lib="2" map="Ctrl Button1" name="Menu Tool"/>
+  </mappings>
+  <toolbar>
+    <tool lib="2" name="Poke Tool"/>
+    <tool lib="2" name="Edit Tool"/>
+    <sep/>
+    <tool lib="0" name="Pin"/>
+    <tool lib="0" name="Pin">
+      <a name="facing" val="west"/>
+      <a name="type" val="output"/>
+    </tool>
+    <tool lib="1" name="NAND Gate"/>
+    <tool lib="4" name="D Flip-Flop"/>
+  </toolbar>
+  <circuit name="{circuit_name}">
+    <a name="appearance" val="logisim_evolution"/>
+    <a name="circuit" val="{circuit_name}"/>
+    <a name="circuitnamedboxfixedsize" val="true"/>
+    <a name="simulationFrequency" val="1.0"/>
+{decoder_xml}
+  </circuit>
+  <circuit name="main">
+    <a name="appearance" val="logisim_evolution"/>
+    <a name="circuit" val="main"/>
+    <a name="simulationFrequency" val="1.0"/>
+{harness_xml}
+  </circuit>
+</project>
+'''
+
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(xml)
+
+    n_nand = nand_gate_count(opt_result.builder.gates)
+    print(f'  Exported FSM {path}  '
+          f'({n_nand} NAND gates + {n_state} D flip-flops, '
+          f'{len(fsm_inputs)} inputs, {len(fsm_outputs)} outputs)')

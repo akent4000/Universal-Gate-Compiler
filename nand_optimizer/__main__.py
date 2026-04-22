@@ -47,13 +47,16 @@ from .examples.circuits   import seven_segment, two_bit_adder, bcd_to_excess3
 from .examples.benchmarks import (hamming_weight_5, parity_9,
                                   multiplier_3x3, multiplier_4x4,
                                   misex1, z4ml)
+from .examples.fsm_examples import FSM_EXAMPLES
 from .pipeline          import optimize
 from .tests             import run_tests
-from .circ_export       import export_circ
+from .circ_export       import export_circ, export_fsm_circ
 from .dot_export        import aig_to_dot
 from .verify            import miter_verify
 from .benchmark_runner  import run_benchmarks, BENCHMARKS
 from .property_tests    import run_property_tests
+from .fsm               import (synthesize_fsm, simulate_fsm, parse_kiss,
+                                minimize_states)
 
 
 CIRCUITS = {
@@ -118,11 +121,100 @@ def sanitize_for_logisim(label: str) -> str:
         
     return safe_name
 
+def _run_fsm(key_or_path: str, encoding: str, verbose: bool,
+             circ_path: str = None, script: str = None,
+             skip_minimize: bool = False) -> bool:
+    """Phase 3 dispatch: built-in FSM example or KISS2 file -> synthesize -> test."""
+    if key_or_path in FSM_EXAMPLES:
+        label, factory = FSM_EXAMPLES[key_or_path]
+        stt = factory()
+    else:
+        if not os.path.exists(key_or_path):
+            print(f"Error: FSM file '{key_or_path}' not found.")
+            return False
+        label = os.path.basename(key_or_path)
+        with open(key_or_path, 'r') as fh:
+            stt = parse_kiss(fh.read())
+
+    print(f'\n{chr(9619) * 68}')
+    print(f'  FSM  {label}')
+    print(f'{chr(9619) * 68}')
+    print(f'  {stt}')
+    print(f'  reset     : {stt.reset_state}')
+    print(f'  inputs    : {stt.input_names}')
+    print(f'  outputs   : {stt.output_names}')
+
+    res = synthesize_fsm(stt, encoding=encoding, minimize=not skip_minimize,
+                         verbose=verbose, script=script)
+
+    # Self-check: simulate and confirm outputs match the reference semantics
+    ok = _simulate_and_check(res, stt, verbose=verbose)
+
+    if circ_path:
+        export_fsm_circ(res, circ_path, sanitize_for_logisim(label))
+
+    return ok
+
+
+def _simulate_and_check(fsm_result, orig_stt, verbose: bool = True) -> bool:
+    """
+    Sanity-check a synthesized FSM by stepping it through random input
+    sequences and comparing against a direct interpreter of the original
+    StateTable.  Returns True iff every cycle matches on defined bits.
+    """
+    import random
+    from .fsm import _expand_stt
+    from .truth_table import DASH as _DASH
+
+    # Reference interpreter
+    delta, lam = _expand_stt(orig_stt)
+
+    n_in = orig_stt.n_input_bits
+    # Deterministic random sequence
+    rng = random.Random(1234)
+    if n_in == 0:
+        seq = [tuple()] * 16
+    else:
+        seq = [tuple(rng.randint(0, 1) for _ in range(n_in))
+               for _ in range(32)]
+
+    trace = simulate_fsm(fsm_result, seq)
+
+    # Walk reference machine
+    state = orig_stt.reset_state
+    ok = True
+    n_checked = 0
+    for (obs_state, obs_bits, obs_out), inputs in zip(trace, seq):
+        pat = 0
+        for k, b in enumerate(inputs):
+            pat |= b << (n_in - 1 - k)
+        ref_out = lam[(state, pat)]
+        for k, (o, r) in enumerate(zip(obs_out, ref_out)):
+            if r == _DASH:
+                continue
+            if o != r:
+                if verbose:
+                    print(f'    [FAIL] cycle {n_checked}: output bit {k} '
+                          f'obs={o}, ref={r}, state={state}, inputs={inputs}')
+                ok = False
+                break
+        # Advance reference
+        nxt = delta[(state, pat)]
+        if nxt is not None:
+            state = nxt
+        n_checked += 1
+
+    sym = 'OK' if ok else 'FAIL'
+    print(f'\n  [{sym}] FSM simulation cross-check ({n_checked} cycles, '
+          f'{fsm_result.n_nand} NAND + {fsm_result.n_flip_flops} D-FF)')
+    return ok
+
+
 def main():
     parser = argparse.ArgumentParser(description="Universal NAND Gate Optimizer")
     parser.add_argument('circuit', nargs='?', default='all',
                         help='Circuit / benchmark key, "all", "bench", '
-                             '"proptest", or a .pla file path')
+                             '"proptest", "fsm:<key>", a .pla or .kiss2 file path')
     parser.add_argument('-q', '--quiet', action='store_true',
                         help='Suppress detailed optimization logs')
     parser.add_argument('--circ', metavar='FILE',
@@ -141,10 +233,36 @@ def main():
                              'Commands: balance, rewrite [-z] [-r N] [-K N], '
                              'refactor [-z] [-r N] [-K N], fraig. '
                              'Replaces the built-in rewrite/fraig/balance sequence.')
+    parser.add_argument('--encoding', choices=['binary', 'onehot', 'gray'],
+                        default='binary',
+                        help='State encoding strategy for FSM synthesis (default: binary)')
+    parser.add_argument('--no-state-min', action='store_true',
+                        help='Skip Hopcroft/STAMINA state minimization')
     args = parser.parse_args()
 
     target  = args.circuit
     verbose = not args.quiet
+
+    # FSM synthesis dispatch
+    if target.startswith('fsm:'):
+        key = target[len('fsm:'):]
+        ok = _run_fsm(key, args.encoding, verbose,
+                      circ_path=args.circ, script=args.script,
+                      skip_minimize=args.no_state_min)
+        sys.exit(0 if ok else 1)
+    if target == 'fsm':
+        ok = True
+        for key in FSM_EXAMPLES.keys():
+            if not _run_fsm(key, args.encoding, verbose,
+                            circ_path=None, script=args.script,
+                            skip_minimize=args.no_state_min):
+                ok = False
+        sys.exit(0 if ok else 1)
+    if target.endswith('.kiss') or target.endswith('.kiss2'):
+        ok = _run_fsm(target, args.encoding, verbose,
+                      circ_path=args.circ, script=args.script,
+                      skip_minimize=args.no_state_min)
+        sys.exit(0 if ok else 1)
 
     # Benchmark regression suite
     if target == 'bench':

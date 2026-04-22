@@ -361,6 +361,28 @@ def optimize(tt: TruthTable, verbose: bool = True,
             print(f"\n  [7.5] FRAIGing (simulation + SAT equivalence merging)")
             print(f"      AIG nodes: {_before_fraig} -> {new_aig.n_nodes}")
 
+        # Phase 3.7: Don't-Care-based rewriting (SDC + windowed ODC) ----------
+        from .dont_care import dc_optimize
+        _before_dc = new_aig.n_nodes
+        with profile_pass("Don't-care rewriting", report,
+                          detail=f'{new_aig.n_nodes} nodes'):
+            new_aig, new_out_lits = dc_optimize(new_aig, new_out_lits)
+        if verbose:
+            print(f"\n  [7.7] Don't-Care Rewriting (SDC)")
+            print(f"      AIG nodes: {_before_dc} -> {new_aig.n_nodes}")
+
+        # Phase 3.8: second rewrite sweep picks up the DC-exposed reductions --
+        from .rewrite import rewrite_aig as _rewrite
+        _before_rw2 = new_aig.n_nodes
+        with profile_pass('AIG rewriting (post-DC)', report,
+                          detail=f'{new_aig.n_nodes} nodes'):
+            new_aig, new_out_lits = _rewrite(new_aig,
+                                              out_lits=new_out_lits,
+                                              rounds=1)
+        if verbose:
+            print(f"\n  [7.8] Local AIG Rewriting (post-DC)")
+            print(f"      AIG nodes: {_before_rw2} -> {new_aig.n_nodes}")
+
         # Phase 4: AIG Balancing (depth reduction) ----------------------------
         if balance:
             from .balance import balance_aig, aig_depth
