@@ -1,80 +1,254 @@
-## Roadmap & Claude Agent Workflows
+# Roadmap
 
-Pending tasks from [TODO.md](TODO.md), mapped to the Claude model that best fits each
-implementation effort. Run them via `claude` CLI or the Agent SDK.
+Честный список известных слабостей проекта и путей их исправления, в порядке
+приоритета. Старая версия (распределение задач по моделям Claude) устарела и
+заменена этим документом.
 
-### Opus 4.7 — deep algorithmic reasoning / research-level
-
-Tasks that require multi-step theoretical analysis, novel graph representations, or
-integrating ML research papers into a running compiler:
-
-| Task | Phase | Why Opus |
-|---|---|---|
-| Bi-decomposition (OR/AND/XOR) in `rewrite.py` — SAT-based variable partitioning | 2 | Needs cofactor-matrix analysis + correctness proof under DC |
-| BDD-based decomposition via narrow-width profiles | 2 | ROBDD width profiling + sifting interaction with AIG snapshot/restore |
-| SAT-based resubstitution for k=5–7 cuts (`dc2`-style) | 2 | Cost model + divisor selection heuristics across ODC boundary |
-| XAG (XOR-AND Graph) — first-class XOR nodes + new NPN DB | 2.7 | Major AIG-API redesign; rewrite/FRAIG/balance all need adaptation |
-| MIG (Majority-Inverter Graph) backend | 2.7 | MAJ(a,b,c) axiomatics + mapping from AIG lits |
-| Fixed-point care propagation (`care_rounds_internal`) | 2.7 | Reconvergent fanout analysis; must stay sound under multi-round DC |
-| DeepGate-style GNN embeddings for AIG nodes | 8 | GNN architecture design + training corpus from EPFL runs |
-| DNAS differentiable search for NAND templates | 8 | PyTorch relaxation + straight-through estimator + Z3 binarisation |
-| ML-accelerated SAT branching hints (NeuroSAT-style) | 8 | Z3 phase-selection API + NeuroSAT-like inference in the hot path |
-| DRiLLS-style RL agent for synthesis script control | 8 | A2C/PPO on AIG feature vectors; pre-training loop on MCNC/EPFL |
-
-```bash
-claude --model claude-opus-4-7 "implement bi-decomposition pass in rewrite.py …"
-```
+Живой каталог всех pending-задач по фазам остаётся в [TODO.md](TODO.md).
+Этот файл — мета-слой: **что именно сломано / недоделано / оверсолд** и
+**как чинить**.
 
 ---
 
-### Sonnet 4.6 — substantial but well-specified implementation
+## P0 — Корректность и честность (блокеры доверия)
 
-Tasks with a clear algorithmic spec where the main challenge is correct integration with
-the existing pipeline:
+### 1. `dc --odc` не работает на reconvergent-fanout схемах (soundness gap)
 
-| Task | Phase | Notes |
-|---|---|---|
-| DC V2 instrumentation: topology-aware resub window | 2.7 | Add `level_new` proximity ranking; benchmark on EPFL |
-| DC V2: adaptive sim patterns for n > 14 inputs | 2.7 | `n_sim_patterns` scaling + `n_safety_net_reverts` counter |
-| FSM–datapath integration (`backend='structural'`) | 3.5 | Wire `next_state_fn` callback into `synthesize_fsm()` |
-| ATPG via stuck-at SAT miter | 7 | One SAT instance per fault; fault-coverage metric |
-| Static Timing Analysis (arrival time + slack graph) | 4 | Topological traversal of AIG with gate-delay model |
-| Delay/Area trade-off heuristics in `balance.py` | 4 | Accept depth regression when it saves ≥ N gates |
-| Standard Cell mapping (tree-covering DP) | 5 | Library file parser + dynamic-programming cut cover |
-| LUT mapping (K-feasible cut → FPGA macro) | 5 | Integrate with existing cut enumeration in `rewrite.py` |
-| GPU simulation in `fraig.py` (CuPy tensors) | 4.5 | `[N_nodes × B_vectors]` AND/XOR batched; CPU fallback |
-| Parallel NPN-lookup batching (`rewrite.py`) | 4.5 | Scatter/gather over 65536-entry `AIG_DB_4` on GPU |
-| Verilog front-end (structural + simple behavioural) | 5 | `pyverilog` → AIG; wire with existing pipeline |
-| Incremental synthesis (dirty-subgraph tracking) | 4 | Mark modified cones; skip clean passes |
-| Parallelisation of rewrite/FRAIG across output cones | 4 | `multiprocessing` + shared structural-hash manager |
-| SAT sweeping + window-based optimisation | 2.7 | Bounded-depth cone extraction + local DC + SAT minimise |
-| Multi-Armed Bandit script controller (UCB1) | 8 | `ScriptBandit` class in `script.py`; no neural net needed |
-| QoR predictor MLP (area/depth from AIG stats + script) | 8 | Supervised on own benchmark logs; prune script search space |
-| Package restructuring into subpackages | 6 | Mechanical but must keep bootstrap + all imports intact |
-| Switching activity estimation (probability propagation) | 7 | `p_sw` rule for AND/NOT; base for power-aware rewrites |
-| SCOAP testability metrics | 7 | Controllability / observability formulae over AIG |
+**Симптом.** По результатам EPFL-прогона (V2.d) safety-net miter стабильно
+срабатывает на `router` (n_inputs=60), `priority` (128), `i2c` (147),
+`sin` (24). Каждый revert стирает весь проход — на этих схемах
+`dc --odc` даёт 0% выигрыша. Подъём `sim-W` до 16384 не помогает →
+это теоретический зазор в V2 admissibility check, а не coverage.
 
-```bash
-claude --model claude-sonnet-4-6 "add ATPG stuck-at SAT miter in verify.py …"
-```
+**Видимость для пользователя сейчас.** Нулевая. Дефолтный скрипт
+`"rewrite; fraig; dc; rewrite; balance"` молча выполняет no-op на hard inputs.
+
+**Путь исправления (в порядке возрастания стоимости):**
+1. **Немедленно:** убрать `dc` из дефолтного скрипта до починки; оставить
+   `"rewrite; fraig; rewrite; balance"`. Флаг `--script "... dc ..."` продолжает
+   работать явно.
+2. **Добавить warning:** при `dc --odc` на AIG с `n_inputs > 20` печатать
+   `WARN: --odc has known soundness gap on reconvergent-fanout circuits; see ROADMAP.md`.
+3. **Построить minimal revert cone** (≤50 узлов из `router`) — как regression
+   fixture. Без этого любая «починка» V2 будет вслепую.
+4. **Починить `_propagate_care_sim`** ([dont_care.py:99](nand_optimizer/dont_care.py)) —
+   edge-signal drift после upstream-переписываний; см. гипотезу (a) в
+   [TODO.md:36](TODO.md#L36).
+5. **Альтернатива — window-local DC** (гипотеза (d)): вычислять ODC только в
+   bounded window вокруг узла. Дороже per-node, но без reconvergence-рисков.
+
+**Готово, когда:** EPFL-прогон `dc -r 3 --odc` на четырёх проблемных схемах
+даёт ≥ 0 ревертов и ≥ 5% площади по сравнению с `dc` без `--odc`.
 
 ---
 
-### Haiku 4.5 — mechanical / additive changes
+### 2. Нет CI и регрессионного snapshot-тестирования
 
-Small, self-contained additions where the logic is obvious and the risk of breakage is low:
+**Симптом.** 13.7k LoC, 41 модуль, 0 автоматических gate'ов. T1–T10 запускаются
+только внутри `optimize()` по явному вызову. `proptest` и EPFL CEC — ручные.
+При таком количестве проходов регрессия при любой правке почти гарантирована.
 
-| Task | Phase | Notes |
-|---|---|---|
-| Add `n_resub_1gate_examined` / `_dropped_by_window` counters to `last_dc_stats()` | 2.7 | Two integer counters + log line |
-| `--log-aig` CLI flag to dump per-run AIG stats for ML corpus | 8 | Append JSON row to `~/.nand_optimizer_runs.jsonl` |
-| `--bdd-decomp` flag wiring (just the CLI plumbing, not the algorithm) | 2 | One argparse entry + `pipeline.py` branch |
-| Expose `care_rounds_internal` as `dc -C N` script flag | 2.7 | One flag parse + pass-through to `dc_optimize()` |
-| Add `jk_counter` to `__main__.py` dispatch table | 3.5 | One `elif` case; module already exists |
-| Add import aliases to `__init__.py` for `StructuralModule`, `adder`, `mux` | 3.5 | Three re-export lines |
-| Update project-structure section of this README after Phase 6 rename | 6 | Text edit only |
-| Pin `dd` version in `requirements.txt` | 4 | One line change |
+**Путь исправления:**
+1. **Создать `tests/`:** перенести T1–T10 в pytest-совместимые модули
+   (`test_truth_table.py`, `test_aig.py`, `test_fsm.py`, `test_nand.py`).
+2. **QoR snapshot:** закоммитить `benchmarks/qor_baseline.json` с эталонными
+   NAND counts для `rd53, mult3, mult4, misex1, parity9, z4ml, 7seg, adder,
+   excess3`. Тест-функция сравнивает текущий `optimize()` и падает при
+   регрессии > 5%.
+3. **`.github/workflows/ci.yml`:**
+   - matrix `python-version: [3.9, 3.11]`
+   - `pytest`
+   - `python -m nand_optimizer proptest --cases 50`
+   - `python -m nand_optimizer epfl --subset arithmetic/adder,random_control/ctrl --no-verify`
+   - проверка QoR snapshot
+4. **Pre-commit hook:** `pytest -x` на изменённых модулях (опционально).
 
-```bash
-claude --model claude-haiku-4-5-20251001 "add --log-aig flag to __main__.py …"
+**Готово, когда:** PR, ломающий QoR на `mult3` > 5%, блокируется CI.
+
+---
+
+## P1 — Архитектурный долг
+
+### 3. Плоский пакет из 41 файла
+
+**Симптом.** Навигация между слоями (I/O, synthesis passes, sequential,
+testing) требует знать все имена модулей. `CLAUDE.md` вынужден держать
+таблицу «какой модуль за что отвечает» именно потому, что иерархии нет.
+
+**Путь исправления.** Выполнить Phase 6 из [TODO.md](TODO.md#L108) одним
+механическим коммитом:
+- `nand_optimizer/core/` — `aig.py, expr.py, truth_table.py, implicant.py`
+- `nand_optimizer/synthesis/` — `rewrite.py, fraig.py, balance.py, decomposition.py, dont_care.py, exact_synthesis.py, optimize.py, bidec.py, bdd_decomp.py, sat_resub.py`
+- `nand_optimizer/mapping/` — `nand.py, circ_export.py`
+- `nand_optimizer/io/` — `aiger_io.py, blif_io.py, verilog_io.py, dot_export.py`
+- `nand_optimizer/sequential/` — `fsm.py`
+- `nand_optimizer/datapath/` — `structural.py, datapath.py`
+- `nand_optimizer/analysis/` — `sta.py, switching.py, atpg.py`
+- `nand_optimizer/testing/` — `tests.py, property_tests.py, benchmark_runner.py, epfl_bench.py, profile.py`
+- оркестраторы наверху: `pipeline.py, script.py, verify.py, __init__.py, __main__.py`
+
+**Риск:** bootstrap `precompute_4cut.py` использует env-guard
+(`_NAND_OPTIMIZER_BOOTSTRAPPING=1`) и subprocess — после переезда нужно
+проверить, что guard всё ещё ловит все пути импорта.
+
+**Готово, когда:** все `from nand_optimizer import ...` работают, `python -m
+nand_optimizer` не тормозит на bootstrap, CLAUDE.md обновлён.
+
+---
+
+### 4. `aig_db_4.py` — 65k-строчный Python-файл как хранилище данных
+
+**Симптом.** Grep по кодовой базе спотыкается о БД; IDE открывает её как
+source и лезет его парсить. Это данные, не код.
+
+**Путь исправления.**
+1. В `precompute_4cut.py` сериализовать результат в `aig_db_4.pkl`
+   (`pickle.dump` или `numpy.savez` — 16-bit индексы templates влезают в
+   uint16-массивы).
+2. В `rewrite.py` / `__init__.py` лениво грузить через `pickle.load` при
+   первом обращении.
+3. Удалить генерацию `.py`-файла; `.gitignore` обновить.
+
+**Готово, когда:** `wc -l nand_optimizer/*.py` не содержит 65k-строчного
+файла; bootstrap время и lookup-латентность не выросли.
+
+---
+
+### 5. Python-перформанс не измерен
+
+**Симптом.** Заявлено «для 20+ входов BDD / GPU» в Phase 4/4.5, но нет
+базового cProfile-отчёта по текущему коду. Скорее всего есть «свободные»
+ускорения через numpy, которые не сделаны.
+
+**Путь исправления.**
+1. **Profile baseline:** `python -m cProfile -o prof.out -m nand_optimizer mult4 --script "rewrite; fraig; dc; rewrite; balance"`
+   + snakeviz. Зафиксировать top-10 hotspots в `benchmarks/perf_baseline.md`.
+2. **Numpy-векторизация FRAIG-симуляции:** сейчас в [fraig.py](nand_optimizer/fraig.py)
+   сигнатуры — list of Python int. Перейти на `np.ndarray[uint64, (N_nodes, B_words)]`,
+   операции AND/XOR батчем. Ожидание: 5–20× на симуляционной фазе.
+3. **Только если numpy недостаточно:** рассмотреть Cython для AIG
+   structural-hash lookup.
+
+**Готово, когда:** `mult4` дефолтный прогон < 50% исходного wall-time;
+baseline и текущие числа в repo.
+
+---
+
+## P2 — Depth-over-breadth
+
+### 6. Verilog front-end заявлен, но subset не задокументирован
+
+**Симптом.** 843 LoC нативного парсера — наверняка работает на узком
+подмножестве, но внешне выглядит как «Verilog support».
+
+**Путь исправления.**
+1. В docstring [verilog_io.py](nand_optimizer/verilog_io.py) зафиксировать
+   **явную грамматику subset**'а: какие конструкции парсер принимает, какие
+   даёт явную ошибку. Что-то вроде:
+   ```
+   Supported:
+     - module / endmodule, input, output, wire, assign
+     - Primitives: and, or, nand, nor, xor, xnor, not, buf
+     - Behavioural: always @(*) with if/else, case
+   Not supported:
+     - parameter, generate, for/while, task/function
+     - Sequential always @(posedge clk) — use FSM front-end instead
+     - $-functions, `-directives beyond simple `define
+   ```
+2. **Корпус тестов:** 10 файлов в `tests/verilog/` с expected
+   pass/fail-диагностиками.
+3. **Decision point** (в ROADMAP не решаем): либо инвестировать до ~80%
+   покрытия реальных netlist'ов, либо deprecate и делегировать yosys→BLIF.
+
+**Готово, когда:** пользователь, подающий unsupported-конструкцию, получает
+конкретную ошибку `unsupported construct 'generate' at line N`, а не
+silent-miscompile.
+
+---
+
+### 7. Bandit / auto-compose / BDD-rebuild / SAT-resub — QoR не измерены
+
+**Симптом.** Каждый из этих проходов есть в коде и в README, но нет ответа
+на вопрос «насколько лучше baseline на EPFL?». Риск breadth-over-depth.
+
+**Путь исправления.** Для каждого прохода:
+1. Прогнать EPFL subset с / без прохода, записать в
+   `benchmarks/pass_eval.md` таблицу `(benchmark, baseline_area,
+   with_pass_area, delta_%, wall_time_delta_%)`.
+2. Если delta < 2% на всём subset — пометить проход `experimental` в
+   `--help` и в README; рассмотреть удаление, если depth не планируется.
+3. Если delta > 5% — описать в README, **на каких классах схем** проход
+   выигрывает (arithmetic? control? dense SOPs?).
+
+**Готово, когда:** ни один пасс в дефолтном скрипте не существует «на веру».
+
+---
+
+## P3 — Следующий реальный unlock
+
+### 8. XAG (XOR-AND Graph) как основное расширение AIG
+
+**Мотивация.** AIG моделирует XOR как 3 AND'а с инверсиями. Structural
+hashing не канонизирует их до одной формы → FRAIG и rewrite видят дубликаты,
+которых быть не должно. Это самая очевидная причина отставания по QoR от ABC
+на арифметике (adder/multiplier/sha). MIG — отдельная тема, не делать одновременно.
+
+**Путь исправления (поэтапно):**
+1. **XAG-lite в AIG:** добавить `XORNode(a, b)` как первоклассный узел с
+   key = `('XOR', min(a^1, a), min(b^1, b))` (канонизация по полярности).
+   Constant folding: `XOR(x, 0) = x`, `XOR(x, 1) = ~x`, `XOR(x, x) = 0`.
+2. **FRAIG-симуляция:** add XOR as native op (дешевле чем 3×AND).
+3. **Rewrite:** расширить `aig_to_gates` / `nand.py` detector — XOR-pattern
+   напрямую из XAG-узла, а не reverse-engineering из AND-tree.
+4. **NPN DB:** `aig_db_4.py` содержит XOR-heavy NPN классы как AND-trees;
+   после XAG надо пересобрать DB с XOR-узлами для этих классов (меньше
+   записей, меньше размер).
+
+**Риск:** все существующие проходы (rewrite, balance, fraig) должны уметь
+обрабатывать XOR-узел. Это **ломающий рефакторинг API AIG** — заложить
+неделю работы минимум, плюс регрессионные T1–T10.
+
+**Готово, когда:** EPFL `arithmetic/*` показывает 10–20% снижение AIG-узлов
+по сравнению с чистым AIG-бэкендом.
+
+---
+
+### 9. MIG, GPU, ML — только после P0–P3
+
+**Обоснование.** MIG (Phase 2.7), GPU-проходы (Phase 4.5), ML-guided
+synthesis (Phase 8) — исследовательские направления. Браться за них имеет
+смысл только когда:
+- QoR baseline измерен и стабилен (пункт 8);
+- нет известных soundness-дыр (пункт 1);
+- есть CI, ловящий регрессии (пункт 2);
+- перформанс baseline не упирается в очевидные python-потери (пункт 6).
+
+До тех пор эти фазы в [TODO.md](TODO.md) остаются как research backlog,
+но не должны приоритезироваться.
+
+---
+
+## Порядок исполнения
+
 ```
+P0#1 (dc out of default)    ──┐
+P0#2 (CI + QoR snapshot)    ──┘ база доверия
+         │
+         ▼
+P1#3 (package layout)
+P1#4 (aig_db as .pkl)
+P1#5 (numpy FRAIG)
+         │
+         ▼
+P2#6 (Verilog subset spec)
+P2#7 (pass QoR eval)
+         │
+         ▼
+P3#8 (XAG)
+         │
+         ▼
+P3#9 (MIG / GPU / ML — по готовности)
+```
+
+Раздел README «Limitations» уже добавлен (см. [README.md](README.md)) —
+пользователь сразу видит ограничения, а P0#1 закроет их фактически.

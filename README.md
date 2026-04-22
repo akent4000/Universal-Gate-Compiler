@@ -2,7 +2,7 @@
 
 > **Universal logic compiler — from truth table or FSM to minimal NAND network**
 
-Takes any combinational logic function (truth table, `.pla`, `.aig`/`.aag`, `.blif`) **or a finite-state machine** (Python `StateTable` / KISS2) and produces a globally optimised NAND-only gate network, with formal verification, Logisim Evolution export, and AIGER/BLIF interchange with ABC / Yosys / EPFL tooling.
+Takes any combinational logic function (truth table, `.pla`, `.aig`/`.aag`, `.blif`) **or a finite-state machine** (Python `StateTable` / KISS2) and produces a multi-pass-optimised NAND-only gate network, with formal verification, Logisim Evolution export, and AIGER/BLIF interchange with ABC / Yosys / EPFL tooling. See [Limitations](#limitations) for scope and known gaps.
 
 ---
 
@@ -138,6 +138,42 @@ python -m nand_optimizer 7seg --atpg                   # stuck-at ATPG (SAT mite
 python -m nand_optimizer 7seg --script "balance; rewrite; fraig; dc; balance; rewrite"
 python -m nand_optimizer 7seg --bandit 20              # MAB-guided pass selection
 ```
+
+---
+
+## Limitations
+
+This is a research / educational synthesizer. It is useful, but not a drop-in
+replacement for ABC or commercial EDA. Known gaps:
+
+- **Performance.** Pure Python + Z3. Small benchmarks (n ≤ 12) run in seconds;
+  EPFL arithmetic (`multiplier`, `divisor`, `sin`) takes minutes per design.
+  Not competitive with ABC on throughput.
+- **QoR.** Typically within 1.5–3× of ABC on combinational area, depending on
+  script and circuit class. No parity claim.
+- **Known-broken pass.** `dc --odc` has a soundness gap on circuits with heavy
+  reconvergent fanout: the safety-net miter reverts the whole pass on `router`,
+  `priority`, `i2c`, and `sin`, producing 0% QoR gain on these. The current
+  default script `"rewrite; fraig; dc; rewrite; balance"` silently no-ops on
+  such inputs. Fix is tracked in [ROADMAP.md](ROADMAP.md) P0#1 (removal from
+  default + root-cause patch). Until then, use a manual `--script` without
+  `dc` for reconvergent-heavy designs.
+- **Verilog front-end.** Supports a declared subset only: `module`, `input`,
+  `output`, `wire`, `assign`, primitives (`and/or/nand/nor/xor/xnor/not/buf`),
+  `always @(*)` with `if/else` and `case`. **Not supported:** `parameter`,
+  `generate`, `for`/`while`, `task`/`function`, sequential `always @(posedge
+  clk)` (use the FSM front-end instead), `$`-system-functions. Unsupported
+  constructs raise an explicit parse error.
+- **Scale.** TruthTable path is capped at `n_inputs ≤ 20` (2^n enumeration).
+  Structural / AIG path works beyond that but has not been stress-tested
+  above ~10k AIG nodes. For larger designs, expect long wall-time and use
+  `--no-verify` + EPFL subset flags.
+- **No CI yet.** Regressions are caught manually by the built-in T1–T10
+  suite and EPFL CEC runs. A QoR-snapshot CI is on the roadmap
+  ([ROADMAP.md](ROADMAP.md) P0#2).
+
+If any of these block you for a specific use case, open an issue — the fix
+path for each is documented in [ROADMAP.md](ROADMAP.md).
 
 ---
 
