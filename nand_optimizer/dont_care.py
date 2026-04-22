@@ -278,19 +278,48 @@ def _sync_sig_new(
     sig_new:       Dict[int, int],
     n_before:      int,
     W:             int,
+    level_new:     Optional[Dict[int, int]] = None,
 ) -> None:
     """
     Fill ``sig_new`` for any AND nodes added to ``aig_new`` after node index
     ``n_before``. Idempotent on already-filled ids.
+
+    When ``level_new`` is supplied, also fills per-node topological level
+    (inputs = 0, ANDs = max(fanin levels) + 1) for use by the topology-aware
+    resub window in :func:`_scan_resub_1gate`.
     """
     for i in range(n_before, aig_new.n_nodes):
         nid = i + 1
-        if nid in sig_new:
-            continue
         entry = aig_new._nodes[i]
-        if entry[0] == 'and':
+        if entry[0] == 'and' and nid not in sig_new:
             _, la, lb = entry
             sig_new[nid] = _and_signature(sig_new, la, lb, aig_new, W)
+        if level_new is not None and nid not in level_new:
+            if entry[0] == 'input':
+                level_new[nid] = 0
+            elif entry[0] == 'and':
+                _, la, lb = entry
+                na = aig_new.node_of(la)
+                nb = aig_new.node_of(lb)
+                level_new[nid] = max(
+                    level_new.get(na, 0), level_new.get(nb, 0)
+                ) + 1
+
+
+def _compute_levels_old(aig: AIG) -> Dict[int, int]:
+    """Per-node topological level in the reference AIG (inputs = 0)."""
+    level: Dict[int, int] = {0: 0}
+    for i, entry in enumerate(aig._nodes):
+        nid = i + 1
+        if entry[0] == 'input':
+            level[nid] = 0
+        elif entry[0] == 'and':
+            _, a, b = entry
+            level[nid] = max(
+                level.get(aig.node_of(a), 0),
+                level.get(aig.node_of(b), 0),
+            ) + 1
+    return level
 
 
 def _scan_resub_0gate(
@@ -319,48 +348,91 @@ def _scan_resub_0gate(
 
 
 def _scan_resub_1gate(
-    target:     int,
-    care_v:     int,
-    sig_new:    Dict[int, int],
-    MASK:       int,
-    max_window: int,
-) -> Optional[Tuple[int, int]]:
+    target:       int,
+    care_v:       int,
+    sig_new:      Dict[int, int],
+    MASK:         int,
+    max_window:   int,
+    level_new:    Optional[Dict[int, int]] = None,
+    target_level: Optional[int] = None,
+) -> Tuple[Optional[Tuple[int, int]], int, int]:
     """
     Find a pair of new_aig literals whose AND signature matches ``target``
-    on every cared bit. Returns (a_lit, b_lit) or None.
+    on every cared bit.
 
-    Restricts the search to the most recently added ``max_window`` signals
-    to bound the O(window²) pair enumeration.
+    Returns ``(pair, n_examined, n_dropped_by_window)`` where ``pair`` is
+    ``(a_lit, b_lit)`` or ``None``; ``n_examined`` is the number of ordered
+    node pairs (u_nid ≤ v_nid) actually iterated in the hot loop;
+    ``n_dropped_by_window`` is the number of pairs excluded purely because
+    the signal set was truncated to ``max_window``.
+
+    Window selection:
+      • When ``level_new`` and ``target_level`` are supplied and the signal
+        pool exceeds ``max_window``, the window keeps the ``max_window``
+        nodes whose new_aig level is closest to ``target_level``
+        (topology-aware — signals near the rewrite site are more likely
+        to be structurally relevant resub sources).
+      • Otherwise falls back to the FIFO tail (most-recently-added N),
+        which approximates topology order but drifts when earlier rewrites
+        grow the graph unevenly.
     """
     items: List[Tuple[int, int]] = [
         (nid, sig) for nid, sig in sig_new.items() if nid > 0
     ]
-    if len(items) > max_window:
-        # Most-recently-added signals are closest to the current node in
-        # topological order and tend to be the most productive resub sources.
-        items = items[-max_window:]
+    total = len(items)
 
+    if total > max_window:
+        if level_new is not None and target_level is not None:
+            items.sort(
+                key=lambda it: abs(level_new.get(it[0], 0) - target_level)
+            )
+            items = items[:max_window]
+        else:
+            items = items[-max_window:]
+        # Pairs including u == v: total*(total+1)/2 over the full pool,
+        # max_window*(max_window+1)/2 kept. Difference = pairs dropped
+        # purely due to window truncation.
+        dropped_pairs = (
+            total * (total + 1) // 2
+            - max_window * (max_window + 1) // 2
+        )
+    else:
+        dropped_pairs = 0
+
+    n_examined = 0
+    result: Optional[Tuple[int, int]] = None
     for i_idx, (u_nid, u_sig) in enumerate(items):
+        if result is not None:
+            break
         u_pos = u_sig
         u_neg = (~u_sig) & MASK
         for v_nid, v_sig in items[i_idx:]:
+            n_examined += 1
             v_pos = v_sig
             v_neg = (~v_sig) & MASK
+            matched = False
             for u_lit, s_u in ((u_nid * 2, u_pos), (u_nid * 2 + 1, u_neg)):
+                if matched:
+                    break
                 for v_lit, s_v in ((v_nid * 2, v_pos), (v_nid * 2 + 1, v_neg)):
                     if (((s_u & s_v) ^ target) & care_v) == 0:
-                        return (u_lit, v_lit)
-    return None
+                        result = (u_lit, v_lit)
+                        matched = True
+                        break
+            if matched:
+                break
+    return result, n_examined, dropped_pairs
 
 
 def _reconstruct_from_old(
-    aig:      AIG,
-    new_aig:  AIG,
-    old_id:   int,
-    sig_old:  Dict[int, int],
-    sig_new:  Dict[int, int],
-    lit_map:  Dict[int, int],
-    W:        int,
+    aig:       AIG,
+    new_aig:   AIG,
+    old_id:    int,
+    sig_old:   Dict[int, int],
+    sig_new:   Dict[int, int],
+    lit_map:   Dict[int, int],
+    W:         int,
+    level_new: Optional[Dict[int, int]] = None,
 ) -> Optional[int]:
     """
     Last-resort fallback when the admissibility check rejects every template
@@ -416,7 +488,7 @@ def _reconstruct_from_old(
 
         n_before = new_aig.n_nodes
         result = new_aig.make_and(ra, rb)
-        _sync_sig_new(new_aig, sig_new, n_before, W)
+        _sync_sig_new(new_aig, sig_new, n_before, W, level_new)
         memo[oid] = result
         return result
 
@@ -627,6 +699,12 @@ def _miter_equivalent(
 #  Main pass
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Exhaustive PI enumeration when input count ≤ this threshold gives perfect
+# admissibility coverage (1 << n_inputs sim patterns). For wider circuits we
+# fall back to random sampling and the adaptive-W retry wrapper below.
+SIM_ENUM_THRESHOLD = 14
+
+
 # Counters updated by dc_optimize on each call; inspected by dc_stats / tests.
 _last_stats: Dict[str, int] = {
     'n_templates_admitted':       0,
@@ -639,6 +717,11 @@ _last_stats: Dict[str, int] = {
     'n_exact_admitted':           0,   # exact-synth template accepted by admissibility
     'n_resub_0gate':              0,   # primary rewrite via 0-gate resub
     'n_resub_1gate':              0,   # primary rewrite via 1-gate resub
+    'n_resub_1gate_examined':     0,   # 1-gate resub node-pairs iterated
+    'n_resub_1gate_dropped_by_window': 0,  # pairs skipped due to window truncation
+    'n_sim_retries':              0,   # adaptive-W retries after safety-net revert
+    'final_sim_W':                0,   # simulation width of last successful pass
+    'n_inputs':                   0,   # primary-input count of the input AIG
 }
 
 
@@ -661,9 +744,10 @@ def dc_optimize(
     use_resub:         bool  = True,
     resub_window:      int   = 64,
     rounds:            int   = 1,
-    tfo_cap:           int   = 200,    # retained for CLI compatibility; ignored in V2
     max_nodes:         Optional[int] = None,
     safety_check:      bool  = True,
+    adaptive_sim:      bool  = False,
+    max_sim_W:         int   = 16384,
 ) -> Tuple[AIG, List[AIGLit]]:
     """
     Rewrite ``aig`` using don't-care-aware local substitutions (V2).
@@ -698,18 +782,37 @@ def dc_optimize(
                      signal reuse). Requires ``use_odc`` since the scan
                      needs ``care_sim``. Default True.
     resub_window   : max number of new_aig signals considered per node
-                     for 1-gate resub. 0-gate resub always scans all.
+                     for 1-gate resub. When the pool exceeds this cap,
+                     the window keeps signals whose new_aig topological
+                     level is closest to the level of ``old_id`` in the
+                     reference AIG (topology-aware selection). 0-gate
+                     resub always scans all signals. Instrumentation
+                     (``n_resub_1gate_examined`` and
+                     ``n_resub_1gate_dropped_by_window`` in
+                     :func:`last_dc_stats`) reports hot-loop iterations
+                     vs. pairs skipped purely from window truncation.
     rounds         : number of iterative DC passes (V2.b). Each round
                      re-simulates and re-propagates care from the current
                      AIG, so later rounds can find reductions that were
                      hidden by structural state from earlier rounds. The
                      loop exits early once a round produces no net
                      reduction. Default 1 (single pass).
-    tfo_cap        : ignored in V2 (retained for CLI compatibility).
     max_nodes      : optional cap on AND nodes visited.
     safety_check   : run a final Z3 miter between input and output AIGs;
                      on failure, revert to the input. Always active when
                      ``use_odc`` is True.
+    adaptive_sim   : if True and the safety-net miter reverts the pass,
+                     re-run with ``n_sim_patterns`` doubled (up to
+                     ``max_sim_W``). Default **False** — the V2.d EPFL
+                     probe (router/priority/i2c/sin) showed reverts on
+                     large-input circuits are caused by V2 soundness gaps
+                     under reconvergent fanout, not sim undersampling:
+                     every retry at 2× W also reverts, so the loop only
+                     burns CPU. Kept as an opt-in for when a user has
+                     evidence their revert is sim-coverage-bound.
+    max_sim_W      : cap on adaptive-retry sim width. Default 16384
+                     (≈2KB/signature at this width — fine up to ~50k-node
+                     AIGs memory-wise).
     """
     # Multi-round wrapper (V2.b). Each round re-simulates the current AIG
     # and re-propagates care from scratch, so later rounds can find DC
@@ -733,12 +836,20 @@ def dc_optimize(
                 use_resub=use_resub,
                 resub_window=resub_window,
                 rounds=1,
-                tfo_cap=tfo_cap,
                 max_nodes=max_nodes,
                 safety_check=safety_check,
+                adaptive_sim=adaptive_sim,
+                max_sim_W=max_sim_W,
             )
             for k in _last_stats:
-                accum[k] += _last_stats[k]
+                # final_sim_W is a width, not a tally — take the max across
+                # rounds instead of summing.
+                if k == 'final_sim_W':
+                    accum[k] = max(accum[k], _last_stats[k])
+                elif k == 'n_inputs':
+                    accum[k] = _last_stats[k]
+                else:
+                    accum[k] += _last_stats[k]
             if cur_aig.n_nodes >= prev_nodes:
                 break
         _last_stats.update(accum)
@@ -755,24 +866,95 @@ def dc_optimize(
         'n_exact_admitted':           0,
         'n_resub_0gate':              0,
         'n_resub_1gate':              0,
+        'n_resub_1gate_examined':     0,
+        'n_resub_1gate_dropped_by_window': 0,
+        'n_sim_retries':              0,
+        'final_sim_W':                0,
+        'n_inputs':                   len(aig.input_names()),
     })
 
+    # Adaptive-W retry wrapper (V2.d). When the safety-net miter reverts a
+    # pass on a circuit with n_inputs > SIM_ENUM_THRESHOLD, the revert almost
+    # always indicates sim undersampling of the admissibility check — doubling
+    # W and re-running typically resolves it. The loop caps at ``max_sim_W``;
+    # for circuits where exhaustive PI enumeration already runs, no retries
+    # are attempted (the first-pass coverage is already perfect).
+    n_inputs_here = len(aig.input_names())
+    exhaustive_regime = n_inputs_here <= SIM_ENUM_THRESHOLD
+    cur_W   = n_sim_patterns
+    # Capped at 2 based on the V2.d EPFL probe: on every circuit where the
+    # first pass reverts, the second retry at 2×W reverts too — further
+    # doubling just compounds the wasted work.
+    MAX_RETRIES = 2
+
+    result_aig = aig
+    result_out: List[AIGLit] = list(out_lits)
+
+    for attempt in range(MAX_RETRIES + 1):
+        result_aig, result_out, reverted = _dc_optimize_once(
+            aig, out_lits,
+            cut_size=cut_size,
+            n_sim_patterns=cur_W,
+            timeout_ms=timeout_ms,
+            use_sdc=use_sdc,
+            use_odc=use_odc,
+            use_exact=use_exact,
+            exact_max_gates=exact_max_gates,
+            exact_timeout_ms=exact_timeout_ms,
+            use_resub=use_resub,
+            resub_window=resub_window,
+            max_nodes=max_nodes,
+            safety_check=safety_check,
+        )
+        if not reverted:
+            break
+        if not adaptive_sim or exhaustive_regime or cur_W >= max_sim_W:
+            break
+        cur_W = min(cur_W * 2, max_sim_W)
+        _last_stats['n_sim_retries'] += 1
+
+    _last_stats['final_sim_W'] = cur_W
+    return result_aig, result_out
+
+
+def _dc_optimize_once(
+    aig:               AIG,
+    out_lits:          List[AIGLit],
+    cut_size:          int,
+    n_sim_patterns:    int,
+    timeout_ms:        int,
+    use_sdc:           bool,
+    use_odc:           bool,
+    use_exact:         bool,
+    exact_max_gates:   int,
+    exact_timeout_ms:  int,
+    use_resub:         bool,
+    resub_window:      int,
+    max_nodes:         Optional[int],
+    safety_check:      bool,
+) -> Tuple[AIG, List[AIGLit], bool]:
+    """
+    Single adaptive-sim-W attempt. Does not reset counters (the outer
+    :func:`dc_optimize` owns stats lifecycle). Returns
+    ``(new_aig, new_out, reverted)`` where ``reverted`` is True iff the
+    safety-net miter tripped and the original AIG was returned.
+    """
     try:
         import z3  # noqa: F401
     except ImportError:
-        return aig, list(out_lits)
+        return aig, list(out_lits), False
 
     if aig.n_ands == 0:
-        return aig, list(out_lits)
+        return aig, list(out_lits), False
 
     # Exhaustive PI enumeration when input count is small — gives perfect
-    # admissibility coverage and eliminates the one mult4-style safety-net
-    # revert caused by sim undersampling. For larger inputs, fall back to
-    # random sampling at the requested width.
+    # admissibility coverage. Always prefer exhaustive when it fits: random
+    # sampling at W=2^n has ~37% collision rate (birthday) and misses ~46% of
+    # patterns on average, which was the root cause of spurious reverts on
+    # ctrl.aig (n=7) at W=128 in the V2.d EPFL probe.
     input_names_list = aig.input_names()
     n_inputs = len(input_names_list)
-    SIM_ENUM_THRESHOLD = 14   # W ≤ 16384 — cheap in bit-parallel
-    if n_inputs <= SIM_ENUM_THRESHOLD and (1 << n_inputs) > n_sim_patterns:
+    if n_inputs <= SIM_ENUM_THRESHOLD:
         n_sim_patterns = 1 << n_inputs
         patterns = {
             name: sum(
@@ -795,10 +977,15 @@ def dc_optimize(
 
     cuts    = enumerate_cuts(aig, k=cut_size)
     ref_old = _compute_ref_counts(aig, out_lits)
+    # Reference-AIG levels feed the topology-aware resub window: when the
+    # new_aig signal pool exceeds resub_window, we keep signals whose
+    # new_aig level is closest to the level of old_id in the reference.
+    level_old = _compute_levels_old(aig) if use_resub else {}
 
     new_aig = AIG()
     lit_map: Dict[int, int] = {FALSE: FALSE, TRUE: TRUE}
     sig_new: Dict[int, int] = {0: 0}
+    level_new: Dict[int, int] = {} if use_resub else None  # type: ignore[assignment]
 
     nodes_visited = 0
 
@@ -809,6 +996,8 @@ def dc_optimize(
             nlit = new_aig.make_input(entry[1])
             new_nid = new_aig.node_of(nlit)
             sig_new[new_nid] = patterns.get(entry[1], 0) & MASK
+            if level_new is not None:
+                level_new[new_nid] = 0
             lit_map[old_id * 2]     = nlit
             lit_map[old_id * 2 + 1] = nlit ^ 1
             continue
@@ -959,9 +1148,12 @@ def dc_optimize(
             if primary_resub_0 is None:
                 net_1 = 1 - max_mffc_size
                 if net_1 < best_net:
-                    pair = _scan_resub_1gate(
+                    pair, n_exam, n_drop = _scan_resub_1gate(
                         target, care_v, sig_new, MASK, resub_window,
+                        level_new, level_old.get(old_id),
                     )
+                    _last_stats['n_resub_1gate_examined']          += n_exam
+                    _last_stats['n_resub_1gate_dropped_by_window'] += n_drop
                     if pair is not None:
                         primary_resub_1 = pair
                         best_net = net_1
@@ -982,9 +1174,12 @@ def dc_optimize(
             care_v = care_sim.get(old_id, MASK)
             resub_applied = _scan_resub_0gate(target, care_v, sig_new, MASK)
             if resub_applied is None:
-                resub_pair = _scan_resub_1gate(
+                resub_pair, n_exam, n_drop = _scan_resub_1gate(
                     target, care_v, sig_new, MASK, resub_window,
+                    level_new, level_old.get(old_id),
                 )
+                _last_stats['n_resub_1gate_examined']          += n_exam
+                _last_stats['n_resub_1gate_dropped_by_window'] += n_drop
 
         if primary_resub_0 is not None:
             applied = primary_resub_0
@@ -993,7 +1188,7 @@ def dc_optimize(
         elif primary_resub_1 is not None:
             n_before = new_aig.n_nodes
             applied = new_aig.make_and(primary_resub_1[0], primary_resub_1[1])
-            _sync_sig_new(new_aig, sig_new, n_before, n_sim_patterns)
+            _sync_sig_new(new_aig, sig_new, n_before, n_sim_patterns, level_new)
             _last_stats['n_resub_1gate']     += 1
             _last_stats['n_nodes_rewritten'] += 1
         elif best_choice is not None:
@@ -1002,7 +1197,7 @@ def dc_optimize(
             applied = _apply_template(
                 new_aig, ordered_cut, tmpl_out, ops, k_sel, lit_map,
             )
-            _sync_sig_new(new_aig, sig_new, n_before, n_sim_patterns)
+            _sync_sig_new(new_aig, sig_new, n_before, n_sim_patterns, level_new)
             _last_stats['n_templates_admitted'] += 1
             _last_stats['n_nodes_rewritten']    += 1
         elif resub_applied is not None:
@@ -1011,7 +1206,7 @@ def dc_optimize(
         elif resub_pair is not None:
             n_before = new_aig.n_nodes
             applied = new_aig.make_and(resub_pair[0], resub_pair[1])
-            _sync_sig_new(new_aig, sig_new, n_before, n_sim_patterns)
+            _sync_sig_new(new_aig, sig_new, n_before, n_sim_patterns, level_new)
             _last_stats['n_fallthrough_repairs'] += 1
         elif use_odc and not fall_admissible:
             # Last-resort: the fallthrough AND of rewritten fanins would
@@ -1020,7 +1215,8 @@ def dc_optimize(
             # and structurally rebuild the original sub-graph on top of
             # ancestors whose signatures are still intact.
             rebuilt = _reconstruct_from_old(
-                aig, new_aig, old_id, sig_old, sig_new, lit_map, n_sim_patterns,
+                aig, new_aig, old_id, sig_old, sig_new, lit_map,
+                n_sim_patterns, level_new,
             )
             if rebuilt is not None:
                 applied = rebuilt
@@ -1028,7 +1224,7 @@ def dc_optimize(
             else:
                 n_before = new_aig.n_nodes
                 applied = new_aig.make_and(new_a, new_b)
-                _sync_sig_new(new_aig, sig_new, n_before, n_sim_patterns)
+                _sync_sig_new(new_aig, sig_new, n_before, n_sim_patterns, level_new)
                 _last_stats['n_fallthrough_inadmissible'] += 1
                 import os
                 if os.environ.get('NAND_DC_DEBUG'):
@@ -1042,7 +1238,7 @@ def dc_optimize(
         else:
             n_before = new_aig.n_nodes
             applied = new_aig.make_and(new_a, new_b)
-            _sync_sig_new(new_aig, sig_new, n_before, n_sim_patterns)
+            _sync_sig_new(new_aig, sig_new, n_before, n_sim_patterns, level_new)
 
         lit_map[old_id * 2]     = applied
         lit_map[old_id * 2 + 1] = applied ^ 1
@@ -1057,12 +1253,12 @@ def dc_optimize(
         try:
             if not _miter_equivalent(aig, out_lits, new_aig, new_out):
                 _last_stats['n_safety_net_reverts'] += 1
-                return aig, list(out_lits)
+                return aig, list(out_lits), True
         except Exception:
             _last_stats['n_safety_net_reverts'] += 1
-            return aig, list(out_lits)
+            return aig, list(out_lits), True
 
-    return new_aig, new_out
+    return new_aig, new_out, False
 
 
 def dc_stats(
@@ -1073,7 +1269,6 @@ def dc_stats(
     timeout_ms:     int = 1000,
     use_sdc:        bool = True,
     use_odc:        bool = True,
-    tfo_cap:        int  = 200,    # ignored in V2
 ) -> dict:
     """
     Analyse the AIG without modifying it; return per-pass DC statistics.
