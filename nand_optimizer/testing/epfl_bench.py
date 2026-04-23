@@ -497,7 +497,7 @@ def download_epfl(
     failed: List[str] = []
 
     for key in files:
-        src_url = f'{_RAW_BASE}/{commit}/combinational/aig/{key}'
+        src_url = f'{_RAW_BASE}/{commit}/{key}'
         local   = _abs_path(key)
         print(f'  download {key} ...', end=' ', flush=True)
         try:

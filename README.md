@@ -759,8 +759,9 @@ python -m nand_optimizer.examples.jk_counter
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.11+ (3.11 and 3.12 tested in CI)
 - `z3-solver >= 4.12` — formal verification and exact synthesis
+- `dd >= 0.5.7` — BDD-based decomposition
 - `hypothesis >= 6.90` — property-based testing (`proptest`)
 - `pytest >= 7.4` — test runner
 - Logisim Evolution 4.x for `.circ` import
