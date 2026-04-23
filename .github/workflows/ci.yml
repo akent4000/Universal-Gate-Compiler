@@ -46,6 +46,10 @@ jobs:
       - name: Property regression (50 cases)
         run: python -m nand_optimizer proptest --cases 50
 
+      # Download only the two circuits used in the smoke step.
+      - name: Download EPFL benchmarks (adder + ctrl)
+        run: python -m nand_optimizer epfl-download --subset arithmetic/adder,random_control/ctrl
+
       # Lightest EPFL slice: adder is tiny and ctrl is the fastest
       # random_control circuit. Verify is off because miter timeouts on
       # the bigger EPFL circuits are tracked separately in ROADMAP P0#1.

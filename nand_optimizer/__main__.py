@@ -21,8 +21,9 @@ MCNC benchmarks:
   bench     — run the full MCNC regression suite
 
 EPFL combinational benchmarks (vendored in benchmarks/epfl/):
-  epfl        — run the full arithmetic + random_control suite
-  epfl-check  — audit the local snapshot against upstream GitHub
+  epfl-download — fetch .aig files from GitHub + write manifest.json
+  epfl          — run the full arithmetic + random_control suite
+  epfl-check    — audit the local snapshot against upstream GitHub
 
 Property-based testing:
   proptest  — random equivalence checks (Hypothesis optional)
@@ -63,7 +64,7 @@ from .io.blif_io              import write_blif, read_blif
 from .verify                  import miter_verify, bmc_verify
 from .analysis.atpg           import run_atpg, AtpgResult
 from .testing.benchmark_runner import run_benchmarks, BENCHMARKS
-from .testing.epfl_bench      import run_epfl, check_epfl_updates
+from .testing.epfl_bench      import run_epfl, check_epfl_updates, download_epfl
 from .testing.property_tests  import run_property_tests
 from .sequential.fsm          import (synthesize_fsm, simulate_fsm, parse_kiss,
                                       minimize_states)
@@ -492,6 +493,11 @@ def main():
               and res.get('head_commit') == res['pinned_commit'])
         sys.exit(0 if ok else 1)
 
+    if target == 'epfl-download':
+        subset = [s.strip() for s in args.subset.split(',')] if args.subset else None
+        res = download_epfl(subset=subset, timeout=args.verify_timeout)
+        sys.exit(0 if not res['failed'] else 1)
+
     # Property-based regression
     if target == 'proptest':
         ok = run_property_tests(n_cases=args.cases, verbose=verbose)
@@ -753,7 +759,7 @@ def main():
                      bandit_strategy=bandit_strategy)
         sys.exit(0 if ok else 1)
 
-    avail = ", ".join(list(CIRCUITS) + ['all', 'bench', 'epfl', 'epfl-check', 'proptest'])
+    avail = ", ".join(list(CIRCUITS) + ['all', 'bench', 'epfl', 'epfl-check', 'epfl-download', 'proptest'])
     print(f'\nUnknown circuit "{target}".\nAvailable: {avail}\n')
     sys.exit(1)
 

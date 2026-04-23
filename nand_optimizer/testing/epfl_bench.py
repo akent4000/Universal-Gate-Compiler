@@ -427,6 +427,118 @@ def _fetch_sha256(url: str, timeout: float) -> Tuple[Optional[str], Optional[str
         return None, str(e)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Download helper
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# All files relative to EPFL_ROOT; source path in lsils/benchmarks is
+# combinational/aig/{key}.
+_ALL_FILES = [
+    'arithmetic/adder.aig',
+    'arithmetic/bar.aig',
+    'arithmetic/div.aig',
+    'arithmetic/hyp.aig',
+    'arithmetic/log2.aig',
+    'arithmetic/max.aig',
+    'arithmetic/multiplier.aig',
+    'arithmetic/sin.aig',
+    'arithmetic/sqrt.aig',
+    'arithmetic/square.aig',
+    'random_control/arbiter.aig',
+    'random_control/cavlc.aig',
+    'random_control/ctrl.aig',
+    'random_control/dec.aig',
+    'random_control/i2c.aig',
+    'random_control/int2float.aig',
+    'random_control/mem_ctrl.aig',
+    'random_control/priority.aig',
+    'random_control/router.aig',
+    'random_control/voter.aig',
+]
+
+_UPSTREAM_REPO = 'https://github.com/lsils/benchmarks'
+_RAW_BASE      = 'https://raw.githubusercontent.com/lsils/benchmarks'
+
+
+def download_epfl(
+    subset:  Optional[Iterable[str]] = None,
+    commit:  Optional[str] = None,
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    """Fetch EPFL benchmark .aig files from GitHub and write manifest.json.
+
+    If *commit* is None the current HEAD of lsils/benchmarks is resolved first.
+    If *subset* is None every file in `_ALL_FILES` is downloaded.
+
+    Returns {'ok': int, 'failed': list-of-key, 'commit': sha}.
+    """
+    # Resolve commit.
+    if commit is None:
+        head = _fetch_upstream_head(timeout=timeout)
+        if 'error' in head:
+            raise RuntimeError(f'Could not resolve lsils/benchmarks HEAD: {head["error"]}')
+        commit = head['sha']
+
+    # Normalise subset keys (strip .aig extension for comparison, then re-add).
+    if subset is not None:
+        norm = set(s if s.endswith('.aig') else s + '.aig' for s in subset)
+        files = [f for f in _ALL_FILES if f in norm]
+        unknown = norm - set(_ALL_FILES)
+        if unknown:
+            raise KeyError(f'Unknown EPFL benchmarks: {sorted(unknown)}')
+    else:
+        files = list(_ALL_FILES)
+
+    os.makedirs(EPFL_ROOT, exist_ok=True)
+    for cat in ('arithmetic', 'random_control'):
+        os.makedirs(os.path.join(EPFL_ROOT, cat), exist_ok=True)
+
+    manifest_files: Dict[str, Any] = {}
+    failed: List[str] = []
+
+    for key in files:
+        src_url = f'{_RAW_BASE}/{commit}/combinational/aig/{key}'
+        local   = _abs_path(key)
+        print(f'  download {key} ...', end=' ', flush=True)
+        try:
+            req = urllib.request.Request(
+                src_url, headers={'User-Agent': 'nand_optimizer-epfl-download'})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = r.read()
+            with open(local, 'wb') as f:
+                f.write(data)
+            sha = hashlib.sha256(data).hexdigest()
+            manifest_files[key] = {'sha256': sha, 'source_url': src_url}
+            print(f'ok ({len(data)} bytes)')
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                TimeoutError, OSError) as e:
+            print(f'FAILED: {e}')
+            failed.append(key)
+
+    # Update manifest: preserve existing entries for files not in this batch.
+    existing: Dict[str, Any] = {}
+    if os.path.exists(MANIFEST):
+        with open(MANIFEST, 'r', encoding='utf-8') as f:
+            try:
+                existing = json.load(f).get('files', {})
+            except json.JSONDecodeError:
+                pass
+    existing.update(manifest_files)
+
+    manifest = {
+        'upstream_commit': commit,
+        'upstream_repo':   _UPSTREAM_REPO,
+        'files':           existing,
+    }
+    with open(MANIFEST, 'w', encoding='utf-8') as f:
+        json.dump(manifest, f, indent=2)
+        f.write('\n')
+
+    print(f'\n  manifest written: {MANIFEST}')
+    print(f'  downloaded {len(manifest_files)}, failed {len(failed)}')
+    return {'ok': len(manifest_files), 'failed': failed, 'commit': commit}
+
+
 def _fetch_upstream_head(timeout: float) -> Dict[str, Any]:
     """Query GitHub's REST API for the current HEAD of the benchmarks repo."""
     url = 'https://api.github.com/repos/lsils/benchmarks/commits/master'
