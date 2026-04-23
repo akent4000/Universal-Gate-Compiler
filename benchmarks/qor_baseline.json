@@ -1,0 +1,16 @@
+{
+  "_comment": "QoR snapshot — total NAND gate count after default optimize() script. Guarded by tests/test_qor_snapshot.py with a +5% tolerance. Refresh with `python3 tests/_refresh_qor_baseline.py` when an intentional synthesis change lowers gates or when an invariant fix slightly raises them.",
+  "_script": "default (rewrite; fraig; rewrite; balance)",
+  "_tolerance_pct": 5,
+  "circuits": {
+    "7seg":    40,
+    "adder":   23,
+    "excess3": 15,
+    "rd53":    40,
+    "parity9": 43,
+    "mult3":   74,
+    "misex1":  56,
+    "z4ml":    42,
+    "mult4":   414
+  }
+}

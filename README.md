@@ -174,9 +174,15 @@ replacement for ABC or commercial EDA. Known gaps:
   Structural / AIG path works beyond that but has not been stress-tested
   above ~10k AIG nodes. For larger designs, expect long wall-time and use
   `--no-verify` + EPFL subset flags.
-- **No CI yet.** Regressions are caught manually by the built-in T1–T10
-  suite and EPFL CEC runs. A QoR-snapshot CI is on the roadmap
-  ([ROADMAP.md](ROADMAP.md) P0#2).
+- **CI coverage is intentionally narrow.** The GitHub Actions workflow
+  ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs `pytest`
+  (T1–T13 universal suite + MCNC miter + QoR snapshot + property smoke),
+  `proptest --cases 50`, and an EPFL smoke on `adder + ctrl --no-verify`.
+  It does **not** exhaustively verify the full EPFL suite (prohibitive
+  z3 time on `multiplier` / `sin` / etc.), nor run CEC on auto-composed
+  designs. Pre-merge confidence comes from the 9-circuit QoR snapshot
+  ([benchmarks/qor_baseline.json](benchmarks/qor_baseline.json), +5%
+  tolerance) — not from broad coverage.
 
 If any of these block you for a specific use case, open an issue — the fix
 path for each is documented in [ROADMAP.md](ROADMAP.md).
@@ -575,12 +581,26 @@ The test suite runs automatically after every optimisation:
 | T8 · Don't-care robustness | Network evaluates without crashing on don't-care inputs |
 | T9 · Full cross-check | All outputs correct simultaneously for every row |
 | T10 · Greedy reassociation | Greedy ordering saves gates vs. naïve left-fold; result is still correct |
+| T11 · Ashenhurst-Curtis | Functional decomposition preserves the truth table |
+| T12 · Exact synthesis | SAT-generated templates evaluate to the target Boolean function |
+| T13 · Rewrite equivalence | Post-rewrite AIG is functionally equivalent on every minterm |
 
-Run the full property-based suite (requires `hypothesis`):
+### Running the test suite
 
 ```bash
-python -m nand_optimizer proptest --cases 100
+pytest -v                                      # 25 tests: T1–T13 + MCNC + QoR + property smoke + dc-odc soundness
+pytest tests/test_qor_snapshot.py              # just the QoR regression guard
+python -m nand_optimizer proptest --cases 100  # deeper Hypothesis batch (CI runs 50)
+python3 tests/_refresh_qor_baseline.py         # re-pin benchmarks/qor_baseline.json after an intentional improvement
 ```
+
+The QoR snapshot in [benchmarks/qor_baseline.json](benchmarks/qor_baseline.json)
+holds total NAND counts for the nine reference circuits (`7seg, adder, excess3,
+rd53, parity9, mult3, misex1, z4ml, mult4`) under the default script; any
+current run exceeding `baseline * 1.05` fails `test_qor_snapshot.py` with a
+diagnostic pointing at the refresh script. CI
+([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs this suite on
+Python 3.9 and 3.11 for every push and PR.
 
 ### EPFL Combinational Benchmark Suite
 

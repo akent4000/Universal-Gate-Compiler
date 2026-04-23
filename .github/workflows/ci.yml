@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest + QoR + proptest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.11']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # First `import nand_optimizer` builds the 4-input NPN database
+      # (~5.5 MB, parallel over cores). Doing it up front lets us see
+      # bootstrap cost separately from test time and primes the cache
+      # for subsequent commands.
+      - name: Warm up NPN database (first-import bootstrap)
+        run: python -c "import nand_optimizer"
+
+      - name: Pytest — unit + QoR snapshot + property tests
+        run: pytest -v --tb=short
+
+      # Larger property-based batch than the in-pytest 20-case smoke test.
+      - name: Property regression (50 cases)
+        run: python -m nand_optimizer proptest --cases 50
+
+      # Lightest EPFL slice: adder is tiny and ctrl is the fastest
+      # random_control circuit. Verify is off because miter timeouts on
+      # the bigger EPFL circuits are tracked separately in ROADMAP P0#1.
+      - name: EPFL smoke (adder + ctrl, no verify)
+        run: python -m nand_optimizer epfl --subset arithmetic/adder,random_control/ctrl --no-verify

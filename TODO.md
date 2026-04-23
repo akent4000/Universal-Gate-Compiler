@@ -10,7 +10,7 @@
 ## Фаза 1: Инфраструктура, Бенчмарки и Надежность
 *Надежный фундамент критически важен, так как сложные оптимизации на графах (AIG) очень легко ломают логику схемы.*
 
-Завершено: MCNC-бенчмарки, miter-верификация через Z3, property-based testing (Hypothesis), профилирование пайплайна. См. [TODO_done.md](TODO_done.md#фаза-1-инфраструктура-бенчмарки-и-надежность).
+Завершено: MCNC-бенчмарки, miter-верификация через Z3, property-based testing (Hypothesis), профилирование пайплайна, **pytest-обёртки для T1–T13 + QoR snapshot (benchmarks/qor_baseline.json, +5% tolerance) + GitHub Actions CI (py3.9/3.11, pytest → proptest-50 → EPFL smoke)** — закрывает ROADMAP P0#2. См. [TODO_done.md](TODO_done.md#фаза-1-инфраструктура-бенчмарки-и-надежность).
 
 ---
 
