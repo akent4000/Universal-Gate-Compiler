@@ -28,6 +28,17 @@ dc [-K N] [-T N] [-W N] [-r N] [-C N] [--no-sdc] [--odc] [--dc-exact] [--no-resu
                        --odc      enable observability DCs (V2 sim-based
                                   admissibility check; sound modulo sim
                                   coverage, protected by end-of-pass miter)
+                       --odc-mode M  ODC mode: legacy (default), z3-exact
+                                  (sound exact Z3 admissibility — closes the
+                                  ROADMAP P0#1 soundness gap, ~3-30× slower),
+                                  hybrid (drift-aware care refresh; use with
+                                  --care-refresh-every N), window (forward-
+                                  flip fanout-bounded care; use with
+                                  --window-depth K)
+                       --care-refresh-every N  refresh care every N rewrites
+                                  (hybrid mode only; 0 = off; default 0)
+                       --window-depth K  fanout window depth (window mode;
+                                  default 5)
                        --dc-exact enable SAT-based exact-synth fallback
                                   for cuts with k > 4 (requires -K >= 5)
                        --no-resub disable V2.c window resubstitution
@@ -59,11 +70,16 @@ import math
 from random import Random
 from typing import Any, Dict, List, Optional, Tuple
 
-from .aig import AIG
+from .core.aig import AIG
 
 AIGLit = int
 
-DEFAULT_SCRIPT = "rewrite; fraig; dc; rewrite; balance"
+#  ``dc`` is currently excluded from the default script: ``dc --odc`` has a
+#  soundness gap on reconvergent-fanout circuits (ROADMAP P0#1) that causes
+#  the safety-net miter to revert the whole pass on several EPFL designs,
+#  producing 0% QoR gain. Users who want DC can still call it explicitly
+#  via ``--script "... dc ..."``.
+DEFAULT_SCRIPT = "rewrite; fraig; rewrite; balance"
 
 DEFAULT_ARMS: List[str] = [
     'balance',
@@ -201,6 +217,29 @@ def parse_script(script: str) -> List[Tuple[str, Dict[str, Any]]]:
                 kwargs['use_odc'] = True
             elif tok == '--no-odc' and cmd == 'dc':
                 kwargs['use_odc'] = False
+            elif tok == '--odc-mode' and cmd == 'dc':
+                if i + 1 >= len(tokens):
+                    raise ValueError("--odc-mode requires a mode argument")
+                from .synthesis.dont_care import (
+                    ODC_MODE_LEGACY, ODC_MODE_HYBRID, ODC_MODE_WINDOW, ODC_MODE_Z3_EXACT
+                )
+                m = tokens[i + 1]
+                if m not in (ODC_MODE_LEGACY, ODC_MODE_HYBRID, ODC_MODE_WINDOW, ODC_MODE_Z3_EXACT):
+                    raise ValueError(
+                        f"Unknown --odc-mode {m!r}; choose: legacy, hybrid, window, z3-exact"
+                    )
+                kwargs['odc_mode'] = m
+                i += 1
+            elif tok == '--care-refresh-every' and cmd == 'dc':
+                if i + 1 >= len(tokens):
+                    raise ValueError("--care-refresh-every requires an integer argument")
+                kwargs['care_refresh_every'] = int(tokens[i + 1])
+                i += 1
+            elif tok == '--window-depth' and cmd == 'dc':
+                if i + 1 >= len(tokens):
+                    raise ValueError("--window-depth requires an integer argument")
+                kwargs['window_depth'] = int(tokens[i + 1])
+                i += 1
             elif tok == '--dc-exact' and cmd == 'dc':
                 kwargs['use_exact'] = True
             elif tok == '--no-resub' and cmd == 'dc':
@@ -297,10 +336,10 @@ def run_script(
     verbose: bool = True,
 ) -> Tuple[AIG, List[AIGLit]]:
     """Apply a synthesis script to an AIG, returning (new_aig, new_out_lits)."""
-    from .rewrite    import rewrite_aig
-    from .balance    import balance_aig, aig_depth
-    from .fraig      import fraig as _fraig
-    from .dont_care  import dc_optimize
+    from .synthesis.rewrite    import rewrite_aig
+    from .synthesis.balance    import balance_aig, aig_depth
+    from .synthesis.fraig      import fraig as _fraig
+    from .synthesis.dont_care  import dc_optimize
 
     commands = parse_script(script)
     n = len(commands)
@@ -340,19 +379,19 @@ def run_script(
                 print(f"      nodes: {n_before} -> {aig.n_nodes}")
 
         elif cmd == 'bidec':
-            from .bidec import bidec_aig
+            from .synthesis.bidec import bidec_aig
             aig, out_lits = bidec_aig(aig, out_lits, **kwargs)
             if verbose:
                 print(f"      nodes: {n_before} -> {aig.n_nodes}")
 
         elif cmd == 'bdd':
-            from .bdd_decomp import bdd_decompose_aig
+            from .synthesis.bdd_decomp import bdd_decompose_aig
             aig, out_lits = bdd_decompose_aig(aig, out_lits, **kwargs)
             if verbose:
                 print(f"      nodes: {n_before} -> {aig.n_nodes}")
 
         elif cmd == 'resub':
-            from .sat_resub import resub_aig
+            from .synthesis.sat_resub import resub_aig
             aig, out_lits = resub_aig(aig, out_lits, **kwargs)
             if verbose:
                 print(f"      nodes: {n_before} -> {aig.n_nodes}")

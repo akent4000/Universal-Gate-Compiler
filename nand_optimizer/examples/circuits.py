@@ -15,7 +15,7 @@
     10-15                  x  x  x  x  x  x  x   (don't care)
 """
 
-from ..truth_table import TruthTable
+from ..core.truth_table import TruthTable
 
 
 def seven_segment() -> TruthTable:

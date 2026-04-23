@@ -27,10 +27,10 @@ A dict with keys:
 from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 
-from .truth_table import TruthTable
-from .pipeline    import OptimizeResult
-from .nand        import eval_network
-from .implicant   import int_to_bits
+from .core.truth_table import TruthTable
+from .pipeline         import OptimizeResult
+from .mapping.nand     import eval_network
+from .core.implicant   import int_to_bits
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -204,8 +204,8 @@ def _per_output_dc_sets(fsm_result) -> Dict[str, set]:
     populates the corresponding set so the BMC miter can suppress false
     alarms on those positions.
     """
-    from .fsm        import _expand_stt, _pattern_bits
-    from .truth_table import DASH as _DASH
+    from .sequential.fsm   import _expand_stt, _pattern_bits
+    from .core.truth_table import DASH as _DASH
 
     stt        = fsm_result.stt
     enc        = fsm_result.encoding

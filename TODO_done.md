@@ -112,6 +112,27 @@
 
 * [x] **Multi-Armed Bandit контроллер скрипта синтеза (`ScriptBandit`):** Реализовано в [`nand_optimizer/script.py`](nand_optimizer/script.py) как класс `ScriptBandit` с двумя стратегиями: **UCB1** (`arg max μᵢ + c·√(2·ln t / nᵢ)`) и **Thompson Sampling** (Beta-prior, reward clipping в [0,1]). Arms по умолчанию — single-command скрипты `balance`, `rewrite`, `rewrite -z`, `fraig`, `dc` (настраиваемы через `arms=[...]`). На каждом шаге: `select()` возвращает index ручки, снаружи прогоняется соответствующая команда через `run_script`, `update()` получает reward = `(n_before - n_after) / n_before` по числу AND-узлов. `run_bandit(aig, out_lits, horizon, strategy)` — standalone-оркестратор, возвращает trace выбранных команд. Интегрировано в `optimize()` через параметры `bandit_horizon=N`, `bandit_strategy={'ucb1','thompson'}`; в CLI — `--bandit HORIZON`, `--bandit-strategy`. `--bandit` оверрайдит `--script`. FlowTune-стиль подход: без нейросети, накопленная статистика прокачивает вероятности выбора без pre-training.
 
+* [x] **Don't-Care V3 — устранение soundness gap под reconvergent fanout:** Корень проблемы V2 — не undersampling, а admissibility coverage: для схем с 60–147 PI exhaustive-проверка `W=16384` всё равно ревертит, значит sim-based admissibility в принципе недостаточна. Реализованы три механизма:
+
+  1. **`odc_mode='z3-exact'`** ([dont_care.py](nand_optimizer/dont_care.py)): для каждого template и каждой resub-операции выполняется точная Z3-проверка `UNSAT(ODC_v AND T(cut) ≠ old_v)`, где `ODC_v` вычисляется через `z3.substitute` (кэшируется по узлу — O(n_nodes × n_POs) один раз, затем O(SAT) на check). CLI: `dc --odc --odc-mode z3-exact`. Результаты на EPFL:
+
+     | benchmark | n_ands | reverts legacy | reverts z3-exact | area delta |
+     |-----------|--------|----------------|-----------------|------------|
+     | router    | 257    | 1              | **0** ✓         | −2.3%      |
+     | priority  | 978    | 1              | **0** ✓         | −21.9%     |
+     | i2c       | 1342   | 1              | **0** ✓         | −0.1%      |
+     | sin       | 5416   | 1              | 1 (>3000 AND → legacy fallback) | 0% |
+
+     Скорость: 4–27 s на benchmark vs. 0.2–2 s legacy (10–15× overhead из-за Z3 per-template). `sin` превышает порог `n_ands ≤ 3000` и автоматически падает в legacy.
+
+  2. **`odc_mode='window'`** ([dont_care.py: `_propagate_care_sim_window`](nand_optimizer/dont_care.py)): forward-flip per-node симуляция в K-уровневом fanout-окне вместо глобального care propagation. Меньше reconvergence-рисков, полезен для малых схем как консервативная альтернатива. CLI: `dc --odc --odc-mode window --window-depth K`. На фикстуре router (depth=1, W=32768) reverts=0; на полных EPFL-схемах coverage-проблема admissibility check сохраняется при глубоких путях.
+
+  3. **Topology-aware 1-gate resub window** ([dont_care.py: `_scan_resub_1gate`](nand_optimizer/dont_care.py)): при переполнении пула (`len(items) > max_window`) вместо FIFO-хвоста выбираются `max_window` узлов, чей уровень в `new_aig` ближайший к уровню целевого узла. Уровни заполняются инкрементально в `_sync_sig_new` при добавлении новых AND-узлов. Инструментация: счётчики `n_resub_1gate_examined` (итераций в hot-loop) и `n_resub_1gate_dropped_by_window` (пар, пропущенных из-за усечения) добавлены в `last_dc_stats()`.
+
+  **Regression:** минимальный revert-воспроизводящий cone из `router` outport[1] извлечён delta-debug с constant-substitution: [tests/fixtures/router_outport1_minimal.aig](tests/fixtures/router_outport1_minimal.aig) — 14 AND / 15 inputs / 1 output. Тест-файл [tests/test_dc_odc_soundness.py](tests/test_dc_odc_soundness.py) содержит 3 инварианта: (1) `dc` без `--odc` не ревертит фикстуру; (2) `dc --odc --odc-mode z3-exact` не ревертит; (3) `dc --odc` legacy ревертит фикстуру (live-сигнал, что legacy gap ещё не залатан для этого входа).
+
+  **Прочие изменения:** удалён устаревший параметр `tfo_cap` из `dc_optimize()` (был CLI-совместимым заглушкой ещё с V1, игнорировался в V2); поля `sta` и `switching` добавлены в `OptimizeResult` для будущей интеграции STA/switching-aware optimization.
+
 ---
 
 ## Фаза 5 (续)
@@ -135,6 +156,28 @@
   - `critical_path_depth(aig, output_lits)` → `int` — минимальная глубина дерева для достижения всех выходов
   
   Используется в `balance.py` для регулирования целевой глубины AND-дерева при пересборке; в будущем — основа для delay/area trade-off эвристик в Stage [8] pipeline.
+
+---
+
+## Фаза 6: Реструктуризация проекта (Package Layout)
+
+* [x] **Разбиение плоского пакета на подпакеты по слоям:** Плоский `nand_optimizer/` (37 Python-модулей) разложен по 8 подпакетам одним механическим коммитом через `git mv`, так что история каждого файла сохранена как rename. Итоговая раскладка:
+  - `nand_optimizer/core/` — `aig.py`, `expr.py`, `truth_table.py`, `implicant.py`
+  - `nand_optimizer/synthesis/` — `rewrite.py`, `fraig.py`, `balance.py`, `decomposition.py`, `dont_care.py`, `exact_synthesis.py`, `optimize.py`, `bidec.py`, `bdd_decomp.py`, `sat_resub.py`
+  - `nand_optimizer/mapping/` — `nand.py`, `circ_export.py`
+  - `nand_optimizer/io/` — `aiger_io.py`, `blif_io.py`, `verilog_io.py`, `dot_export.py`
+  - `nand_optimizer/sequential/` — `fsm.py`
+  - `nand_optimizer/datapath/` — `structural.py`, `datapath.py`
+  - `nand_optimizer/analysis/` — `sta.py`, `switching.py`, `atpg.py`
+  - `nand_optimizer/testing/` — `tests.py`, `property_tests.py`, `benchmark_runner.py`, `epfl_bench.py`, `profile.py`
+  - Оркестраторы на верхнем уровне: `pipeline.py`, `script.py`, `verify.py`, `__init__.py`, `__main__.py`, плюс CLI-хелпер `auto_compose.py`
+  - Bootstrap-пара: `aig_db_4.py` (generated, gitignored) + `precompute_4cut.py` — оставлены на верхнем уровне, т.к. subprocess-бутстрап спавнит `python -m nand_optimizer.precompute_4cut` и рассчитывает на неизменный import-path.
+
+  **Импорты:** каждый subpackage↔subpackage импорт переписан через `..other.mod`, внутрисубпакетные — через `.mod`, top-level→subpackage — через `.subpkg.mod`. Все 95 символов из `nand_optimizer.__all__` по-прежнему re-exported в [`__init__.py`](nand_optimizer/__init__.py), так что `from nand_optimizer import X` для публичного API работает без изменений. Внешние тесты [tests/test_dc_odc_soundness.py](tests/test_dc_odc_soundness.py) обновлены на новые пути (`nand_optimizer.io.aiger_io`, `nand_optimizer.synthesis.dont_care`, `nand_optimizer.synthesis.fraig`).
+
+  **Bootstrap-проверка:** env-guard `_NAND_OPTIMIZER_BOOTSTRAPPING=1` в [`__init__.py`](nand_optimizer/__init__.py) обрезает импорт subpackage-модулей в subprocess-воркерах `precompute_4cut.py`, не давая им попасть на ещё-не-сгенерированный `aig_db_4.py`. Проверено чистым перезапуском: удалён `aig_db_4.py` → `import nand_optimizer` корректно спавнит subprocess, дожидается генерации (~8 s, workers=8), после чего родительский процесс доимпортирует все 95 символов. Pool-hang при `mp.Pool` внутри package-init по-прежнему обходится через `mp.get_context('spawn')`.
+
+  **Регрессия:** `python -m nand_optimizer all` — 411/411 T-тестов прошли на 7seg (62), adder (33), excess3 (41), rd53 (33), parity9 (19), mult3 (54), mult4 (68), misex1 (61), z4ml (40). `pytest tests/` — 6/6 passed. `proptest --cases 20` — 20/20 OK. Полный скрипт `balance; rewrite; fraig; dc; bidec; resub; balance` отрабатывает без регрессий. [CLAUDE.md](CLAUDE.md) обновлён: добавлен раздел «Package Layout» с деревом, таблица модулей и pipeline-диаграмма теперь ссылаются на новые пути (`core/aig.py`, `synthesis/rewrite.py` и т.д.).
 
 ---
 

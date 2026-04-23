@@ -54,19 +54,19 @@ from .examples.benchmarks import (hamming_weight_5, parity_9,
 from .examples.fsm_examples import FSM_EXAMPLES
 from .examples.jk_counter  import (universal_reversible_counter,
                                     run_jkcounter_regression)
-from .pipeline          import optimize, hierarchical_optimize
-from .tests             import run_tests
-from .circ_export       import export_circ, export_fsm_circ
-from .dot_export        import aig_to_dot
-from .aiger_io          import write_aiger, read_aiger
-from .blif_io           import write_blif, read_blif
-from .verify            import miter_verify, bmc_verify
-from .atpg              import run_atpg, AtpgResult
-from .benchmark_runner  import run_benchmarks, BENCHMARKS
-from .epfl_bench        import run_epfl, check_epfl_updates
-from .property_tests    import run_property_tests
-from .fsm               import (synthesize_fsm, simulate_fsm, parse_kiss,
-                                minimize_states)
+from .pipeline                import optimize, hierarchical_optimize
+from .testing.tests           import run_tests
+from .mapping.circ_export     import export_circ, export_fsm_circ
+from .io.dot_export           import aig_to_dot
+from .io.aiger_io             import write_aiger, read_aiger
+from .io.blif_io              import write_blif, read_blif
+from .verify                  import miter_verify, bmc_verify
+from .analysis.atpg           import run_atpg, AtpgResult
+from .testing.benchmark_runner import run_benchmarks, BENCHMARKS
+from .testing.epfl_bench      import run_epfl, check_epfl_updates
+from .testing.property_tests  import run_property_tests
+from .sequential.fsm          import (synthesize_fsm, simulate_fsm, parse_kiss,
+                                      minimize_states)
 
 
 CIRCUITS = {
@@ -242,8 +242,8 @@ def _simulate_and_check(fsm_result, orig_stt, verbose: bool = True) -> bool:
     StateTable.  Returns True iff every cycle matches on defined bits.
     """
     import random
-    from .fsm import _expand_stt
-    from .truth_table import DASH as _DASH
+    from .sequential.fsm   import _expand_stt
+    from .core.truth_table import DASH as _DASH
 
     # Reference interpreter
     delta, lam = _expand_stt(orig_stt)
@@ -498,8 +498,8 @@ def main():
         sys.exit(0 if ok else 1)
 
     if getattr(args, 'auto_compose', False) and target.endswith('.pla'):
-        from .truth_table    import TruthTable as _TT
-        from .auto_compose   import auto_generate_spec as _auto_spec
+        from .core.truth_table import TruthTable as _TT
+        from .auto_compose     import auto_generate_spec as _auto_spec
         import json as _json, os as _os
 
         pla_path = target
@@ -577,6 +577,8 @@ def main():
             stage_specs,
             post_script=args.script,
             verbose=not args.quiet,
+            bandit_horizon=bandit_horizon,
+            bandit_strategy=bandit_strategy,
         )
         print(f'\n  Total NAND gates: {result.total_nand}')
 
@@ -604,7 +606,7 @@ def main():
         with open(spec_path) as _f:
             spec = json.load(_f)
 
-        from .truth_table import TruthTable as _TT
+        from .core.truth_table import TruthTable as _TT
         _pla_cache: dict = {}
         stage_specs = []
         spec_dir = _os.path.dirname(_os.path.abspath(spec_path))
@@ -629,6 +631,8 @@ def main():
             stage_specs,
             post_script=args.script,
             verbose=not args.quiet,
+            bandit_horizon=bandit_horizon,
+            bandit_strategy=bandit_strategy,
         )
         print(f'\n  Total NAND gates: {result.total_nand}')
 
@@ -653,7 +657,7 @@ def main():
         sys.exit(0)
 
     if target.endswith('.pla') or target.endswith('.espresso'):
-        from .truth_table import TruthTable
+        from .core.truth_table import TruthTable
         if not os.path.exists(target):
             print(f"Error: PLA file '{target}' not found.")
             sys.exit(1)
@@ -686,7 +690,7 @@ def main():
 
     # Verilog input
     if target.endswith('.v') or target.endswith('.sv'):
-        from .verilog_io import read_verilog, VerilogError
+        from .io.verilog_io import read_verilog, VerilogError
         if not os.path.exists(target):
             print(f"Error: Verilog file '{target}' not found.")
             sys.exit(1)

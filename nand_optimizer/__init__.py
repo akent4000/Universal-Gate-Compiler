@@ -46,49 +46,49 @@ else:
         del _subprocess, _sys, _env
     del _os, _precompute_4cut
 
-    from .truth_table       import TruthTable
-    from .pipeline          import optimize, OutputResult
-    from .expr              import Expr, Const, Lit, Not, And, Or, ONE, ZERO, simp
-    from .implicant         import (Implicant, quine_mccluskey, espresso,
-                                    multi_output_espresso)
-    from .optimize          import (phase_assign, factorize, brayton_factor,
-                                    apply_shannon, elim_inv,
-                                    multi_output_factorize)
-    from .decomposition     import (DecompositionResult, ashenhurst_decompose,
-                                    decompose_expr)
-    from .aig               import AIG
-    from .nand              import (NANDBuilder, Gate, eval_network, nand_gate_count,
-                                    implicants_to_aig)
-    from .rewrite           import rewrite_aig, enumerate_cuts, evaluate_cut_tt
-    from .fraig             import fraig, fraig_stats
-    from .dont_care         import dc_optimize, dc_stats
-    from .balance           import balance_aig, aig_depth
-    from .sta               import STAResult, TimingEntry, sta_aig, sta_nand, compute_sta
-    from .switching         import SwitchingActivity, estimate_switching
-    from .exact_synthesis   import (exact_synthesize, evaluate_template,
-                                    exact_cache_stats, exact_cache_clear)
-    from .circ_export       import export_circ, export_fsm_circ
-    from .dot_export        import aig_to_dot
-    from .aiger_io          import write_aiger, read_aiger
-    from .blif_io           import write_blif, read_blif
-    from .verify            import miter_verify, bmc_verify
-    from .atpg              import run_atpg, AtpgResult, FaultResult
-    from .tests             import run_tests
-    from .profile           import ProfileReport, profile_pass
-    from .benchmark_runner  import run_benchmarks, run_one_benchmark, BENCHMARKS
-    from .epfl_bench        import (run_epfl, run_one_epfl,
-                                    check_epfl_updates, aig_equivalence)
-    from .property_tests    import run_property_tests, check_equivalence
-    from .fsm               import (StateTable, Transition, FSMResult,
-                                    minimize_states, encode_states,
-                                    fsm_to_truth_table, synthesize_fsm,
-                                    simulate_fsm, parse_kiss)
-    from .structural        import StructuralModule
-    from .script            import (ScriptBandit, run_bandit,
-                                    DEFAULT_ARMS, DEFAULT_SCRIPT,
-                                    parse_script, run_script)
-    from .verilog_io        import (read_verilog, parse_verilog,
-                                    verilog_to_module, VerilogError)
+    from .core.truth_table       import TruthTable
+    from .pipeline                import optimize, OutputResult
+    from .core.expr               import Expr, Const, Lit, Not, And, Or, ONE, ZERO, simp
+    from .core.implicant          import (Implicant, quine_mccluskey, espresso,
+                                          multi_output_espresso)
+    from .synthesis.optimize      import (phase_assign, factorize, brayton_factor,
+                                          apply_shannon, elim_inv,
+                                          multi_output_factorize)
+    from .synthesis.decomposition import (DecompositionResult, ashenhurst_decompose,
+                                          decompose_expr)
+    from .core.aig                import AIG
+    from .mapping.nand            import (NANDBuilder, Gate, eval_network, nand_gate_count,
+                                          implicants_to_aig)
+    from .synthesis.rewrite          import rewrite_aig, enumerate_cuts, evaluate_cut_tt
+    from .synthesis.fraig            import fraig, fraig_stats
+    from .synthesis.dont_care        import dc_optimize, dc_stats
+    from .synthesis.balance          import balance_aig, aig_depth
+    from .analysis.sta               import STAResult, TimingEntry, sta_aig, sta_nand, compute_sta
+    from .analysis.switching         import SwitchingActivity, estimate_switching
+    from .synthesis.exact_synthesis  import (exact_synthesize, evaluate_template,
+                                             exact_cache_stats, exact_cache_clear)
+    from .mapping.circ_export        import export_circ, export_fsm_circ
+    from .io.dot_export              import aig_to_dot
+    from .io.aiger_io                import write_aiger, read_aiger
+    from .io.blif_io                 import write_blif, read_blif
+    from .verify                     import miter_verify, bmc_verify
+    from .analysis.atpg              import run_atpg, AtpgResult, FaultResult
+    from .testing.tests              import run_tests
+    from .testing.profile            import ProfileReport, profile_pass
+    from .testing.benchmark_runner   import run_benchmarks, run_one_benchmark, BENCHMARKS
+    from .testing.epfl_bench         import (run_epfl, run_one_epfl,
+                                             check_epfl_updates, aig_equivalence)
+    from .testing.property_tests     import run_property_tests, check_equivalence
+    from .sequential.fsm             import (StateTable, Transition, FSMResult,
+                                             minimize_states, encode_states,
+                                             fsm_to_truth_table, synthesize_fsm,
+                                             simulate_fsm, parse_kiss)
+    from .datapath.structural        import StructuralModule
+    from .script                     import (ScriptBandit, run_bandit,
+                                             DEFAULT_ARMS, DEFAULT_SCRIPT,
+                                             parse_script, run_script)
+    from .io.verilog_io              import (read_verilog, parse_verilog,
+                                             verilog_to_module, VerilogError)
 
     __all__ = [
         # core pipeline

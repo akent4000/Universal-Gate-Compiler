@@ -29,7 +29,7 @@ import math
 import re
 from typing import Dict, List, Optional, Set, Tuple
 
-from .truth_table import TruthTable
+from .core.truth_table import TruthTable
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────

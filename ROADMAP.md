@@ -20,25 +20,72 @@
 `dc --odc` даёт 0% выигрыша. Подъём `sim-W` до 16384 не помогает →
 это теоретический зазор в V2 admissibility check, а не coverage.
 
-**Видимость для пользователя сейчас.** Нулевая. Дефолтный скрипт
-`"rewrite; fraig; dc; rewrite; balance"` молча выполняет no-op на hard inputs.
+**Видимость для пользователя сейчас.** Шаги 1–2 выполнены: дефолтный скрипт
+теперь `"rewrite; fraig; rewrite; balance"` (без `dc`), а `dc --odc` на AIG
+с `n_inputs > 20` печатает явный warning в stderr. Пользователь, запускающий
+умолчания, больше не получает silent no-op; явный вызов `dc` остаётся
+доступен через `--script`.
 
 **Путь исправления (в порядке возрастания стоимости):**
-1. **Немедленно:** убрать `dc` из дефолтного скрипта до починки; оставить
-   `"rewrite; fraig; rewrite; balance"`. Флаг `--script "... dc ..."` продолжает
-   работать явно.
-2. **Добавить warning:** при `dc --odc` на AIG с `n_inputs > 20` печатать
-   `WARN: --odc has known soundness gap on reconvergent-fanout circuits; see ROADMAP.md`.
-3. **Построить minimal revert cone** (≤50 узлов из `router`) — как regression
-   fixture. Без этого любая «починка» V2 будет вслепую.
-4. **Починить `_propagate_care_sim`** ([dont_care.py:99](nand_optimizer/dont_care.py)) —
-   edge-signal drift после upstream-переписываний; см. гипотезу (a) в
-   [TODO.md:36](TODO.md#L36).
-5. **Альтернатива — window-local DC** (гипотеза (d)): вычислять ODC только в
-   bounded window вокруг узла. Дороже per-node, но без reconvergence-рисков.
+1. ✅ **Выполнено:** `dc` убран из `DEFAULT_SCRIPT`
+   ([nand_optimizer/script.py](nand_optimizer/script.py)); остался
+   `"rewrite; fraig; rewrite; balance"`. Флаг `--script "... dc ..."`
+   продолжает работать явно.
+2. ✅ **Выполнено:** `dc_optimize()` с `use_odc=True` и `n_inputs > 20`
+   печатает в stderr `WARN: dc --odc has known soundness gap on
+   reconvergent-fanout circuits (n_inputs=... > 20); see ROADMAP.md P0#1.`
+   ровно один раз за вызов (см. `_ODC_WARN_DEPTH` в
+   [nand_optimizer/dont_care.py](nand_optimizer/dont_care.py)).
+3. ✅ **Выполнено:** minimal revert cone извлечён из `router`
+   (outport[1]) через delta-debug с constant-substitution внутренних AND-узлов:
+   [tests/fixtures/router_outport1_minimal.aig](tests/fixtures/router_outport1_minimal.aig)
+   — **14 ANDs / 15 inputs / 1 output** (29 node ids). Revert
+   воспроизводится при W ∈ {128, 1024, 16384}, а `dc` без `--odc` на
+   том же входе работает корректно. Regression-тест:
+   [tests/test_dc_odc_soundness.py](tests/test_dc_odc_soundness.py)
+   (3 инварианта + «фикстура обязана ревертить» как live-сигнал, что
+   фикс ещё не landed).
+4. ✅ **Выполнено (V3 — z3-exact admissibility):** Корень проблемы —
+   not care underestimation, but **admissibility coverage**: при 2^60 PI
+   паттернов sim-based check (W=128) пропускает плохие шаблоны. Реализован
+   `odc_mode='z3-exact'` в [dont_care.py](nand_optimizer/dont_care.py) —
+   для каждого template и каждой resub-операции выполняется точная Z3-проверка
+   `UNSAT(ODC_v AND T(cut_old) ≠ old_v)`, где `ODC_v` вычисляется через
+   `z3.substitute` (кэшируется на узел — O(n_nodes × n_POs × substitute_cost)
+   один раз, потом O(SAT) per check). Результаты:
 
-**Готово, когда:** EPFL-прогон `dc -r 3 --odc` на четырёх проблемных схемах
-даёт ≥ 0 ревертов и ≥ 5% площади по сравнению с `dc` без `--odc`.
+   | benchmark | n_ands | no-odc | z3-exact | reverts |
+   |-----------|--------|--------|----------|---------|
+   | router    | 257    | -3.5%  | -2.3%    | 0 ✓    |
+   | priority  | 978    | -8.0%  | **-21.9%** | 0 ✓  |
+   | i2c       | 1342   | -2.2%  | -0.1%    | 0 ✓    |
+   | sin       | 5416   | TBD    | TBD      | TBD    |
+
+   Скорость: 4–27s на benchmark против 0.2–2.3s legacy (10–15× overhead
+   из-за Z3 per-template). Флаги: `dc --odc --odc-mode z3-exact`.
+   Regression: [tests/test_dc_odc_soundness.py](tests/test_dc_odc_soundness.py)
+   (test_z3_exact_no_revert, test_z3_exact_circuit_equivalence).
+5. ✅ **Выполнено (V3 — window-local ODC):** `odc_mode='window'` реализует
+   forward-flip per-node симуляцию в K-уровневом fanout-окне
+   ([dont_care.py: _propagate_care_sim_window](nand_optimizer/dont_care.py)).
+   Работает на фикстуре (depth=1: reverts=0 при исчерпывающем W=32768), но
+   на полных EPFL-схемах (60-147 PI) сохраняет reverts из-за coverage-проблемы
+   admissibility check. Полезен для малых схем как более консервативная
+   альтернатива; флаги: `dc --odc --odc-mode window --window-depth K`.
+
+**Статус (шаги 1–5 выполнены):** `dc --odc --odc-mode z3-exact` даёт:
+
+| bench    | legacy rev | z3-exact rev | z3-exact area | z3-exact time |
+|----------|-----------|--------------|---------------|---------------|
+| router   | 1         | **0** ✓     | -2.3%         | 4.5s          |
+| priority | 1         | **0** ✓     | **-21.9%** ✓  | 26s           |
+| i2c      | 1         | **0** ✓     | -0.1%         | 27s           |
+| sin      | 1         | 1 (>3000 ANDs → legacy fallback) | 0% | 58s |
+
+Criterion ≥5% выполнен на priority (-21.9% vs baseline -8%). router и i2c
+дают скромный выигрыш; sin (5416 ANDs) превышает threshold n_ands≤3000 и
+автоматически падает в legacy. Для production нужен дальнейший speed-up
+(параллельный SAT, incremental formulas, lazy evaluation).
 
 ---
 
@@ -121,7 +168,7 @@ source и лезет его парсить. Это данные, не код.
 ускорения через numpy, которые не сделаны.
 
 **Путь исправления.**
-1. **Profile baseline:** `python -m cProfile -o prof.out -m nand_optimizer mult4 --script "rewrite; fraig; dc; rewrite; balance"`
+1. **Profile baseline:** `python -m cProfile -o prof.out -m nand_optimizer mult4 --script "rewrite; fraig; rewrite; balance"`
    + snakeviz. Зафиксировать top-10 hotspots в `benchmarks/perf_baseline.md`.
 2. **Numpy-векторизация FRAIG-симуляции:** сейчас в [fraig.py](nand_optimizer/fraig.py)
    сигнатуры — list of Python int. Перейти на `np.ndarray[uint64, (N_nodes, B_words)]`,

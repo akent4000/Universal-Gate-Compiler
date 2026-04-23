@@ -6,8 +6,8 @@ simulate_fsm() they produce a full Phase 3 smoke test.
 """
 
 from __future__ import annotations
-from ..fsm import StateTable, Transition
-from ..truth_table import DASH
+from ..sequential.fsm   import StateTable, Transition
+from ..core.truth_table import DASH
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

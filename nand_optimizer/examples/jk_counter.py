@@ -75,8 +75,8 @@ CLI
 from __future__ import annotations
 from typing import List, Tuple
 
-from ..structural import StructuralModule
-from ..datapath   import (
+from ..datapath.structural import StructuralModule
+from ..datapath.datapath   import (
     eq_comparator, zero_detect,
     ripple_up_carry, ripple_down_borrow,
     jk_excitation,

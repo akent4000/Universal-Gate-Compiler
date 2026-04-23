@@ -1,0 +1,1 @@
+"""Datapath / structural module composition."""

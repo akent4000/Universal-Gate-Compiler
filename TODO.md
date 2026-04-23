@@ -30,13 +30,7 @@
 ## Фаза 2.7: Продвинутые манипуляции с графами (Advanced AIG)
 *Инструментарий промышленного качества для работы с AIG.*
 
-Завершено: FRAIGing, AIG balancing, synthesis scripts (`balance; rewrite; fraig`), Graphviz export, precomputed 4-input NPN AIG database, Don't-Care V1 (SDC), Don't-Care V2 (полный Mishchenko 2009: sim-based ODC propagation + window resubstitution + DC-aware exact synthesis + multi-round iterative refinement), `care_rounds_internal` как флаг `dc -C N`, V2.d EPFL-инструментация + adaptive-W + fix exhaustive-enum, Multi-Armed Bandit контроллер `ScriptBandit` (UCB1 + Thompson Sampling) с CLI `--bandit HORIZON`. См. [TODO_done.md](TODO_done.md#фаза-27-продвинутые-манипуляции-с-графами).
-
-* [ ] **Don't-Care V3 — устранение реальной soundness gap:** По итогам V2.d EPFL-прогона (логи: `/tmp/dc_v2_epfl_probe.{log,json}`) safety-net miter стабильно срабатывает на `router` (n_inputs=60), `priority` (128), `i2c` (147), `sin` (24) и **не лечится поднятием sim-W**: все ретраи до W=16384 тоже ревертятся. Значит ревёрты вызваны теоретическим зазором V2 admissibility check под reconvergent fanout, а не coverage. В текущей ревизии (коммит `d7fd1f0`) каждый такой revert стирает работу всего прохода — на этих четырёх схемах `dc --odc` выдаёт 0% выигрыша. Дано: safety-net ловит проблему → soundness пользователя не страдает, но QoR упёрся. Кандидаты для анализа перед латанием:
-    * (a) **Edge-signal drift в `_propagate_care_sim`** ([dont_care.py:99](nand_optimizer/dont_care.py)): формула `care[a] |= care[y] & sb`, где `sb = sig_old[ib]` с поправкой на complement. После апстрим-переписываний фактический сигнал на edge `b` в `new_aig` может отличаться от `sig_old[ib]` на ~care-битах, что делает `care[a]` **недооценкой** истинной care-множества. Admissibility check пропускает ревайт, который на самом деле ломает PO.
-    * (b) **Сохранение care-инварианта через цепочку переписываний.** Утверждение «admissibility check для каждого узла → POs сохраняются на всех sim-паттернах» требует formal-proof: при переписывании `v_i` с `cand_sig_{v_i}` совпадающим с `sig_old[v_i]` только на `care_sim[v_i]` битах, гарантируется ли, что для всех последующих узлов `v_j > v_i` в topo-order их admissibility check'и использовали бы правильный `care_sim`? Mishchenko 2009 §3 описывает single-pass как baseline — нужно вывести точное условие, при котором baseline остаётся sound под sequential rewriting.
-    * (c) **Минимальный revert-воспроизводящий cone** — извлечь из `router`/`priority` подграф в ≤50 узлах, на котором dc --odc ломается, и использовать как regression test. Это проще, чем (a)/(b) теоретически, и даёт конкретный вход для отладки.
-    * (d) **Альтернатива — window-local don't-cares** (в духе SAT sweeping, см. ниже): вместо глобального care propagation вычислять ODC только в window'е вокруг узла. Меньше reconvergence-рисков, но дороже per-node.
+Завершено: FRAIGing, AIG balancing, synthesis scripts (`balance; rewrite; fraig`), Graphviz export, precomputed 4-input NPN AIG database, Don't-Care V1 (SDC), Don't-Care V2 (полный Mishchenko 2009: sim-based ODC propagation + window resubstitution + DC-aware exact synthesis + multi-round iterative refinement), `care_rounds_internal` как флаг `dc -C N`, V2.d EPFL-инструментация + adaptive-W + fix exhaustive-enum, Multi-Armed Bandit контроллер `ScriptBandit` (UCB1 + Thompson Sampling) с CLI `--bandit HORIZON`, Don't-Care V3 (z3-exact per-cut admissibility → 0 reverts на router/priority/i2c; window-local ODC; topology-aware 1-gate resub; regression fixtures в [tests/](tests/)). См. [TODO_done.md](TODO_done.md#фаза-27-продвинутые-манипуляции-с-графами).
 * [ ] **XAG (XOR-AND Graph):** * Ввести XOR как первоклассный узел графа (в дополнение к AND с инверсиями). Сейчас XOR-паттерны детектируются только в [nand.py](nand_optimizer/nand.py) на этапе маппинга — это поздно: rewrite/FRAIG видят XOR как 3 AND и не могут нормально оптимизировать арифметику/криптографию. XAG естественно представляет сумматоры, компараторы, parity-функции и SHA-подобные схемы. Потребует адаптации AIG-API и базы NPN-классов (XAG_DB).
 * [ ] **MIG (Majority-Inverter Graph):** * Альтернативное представление через 3-входовый мажоритарный элемент MAJ(a,b,c) и инверсии. Аксиоматика MIG (commutativity, associativity, distributivity, inverter propagation) даёт более компактное представление сумматоров и умножителей, чем AIG. Аспирационно — полезно как экспериментальный бэкенд для арифметических бенчмарков. Ссылка: Amarú et al., "Majority-Inverter Graph: A New Paradigm for Logic Optimization" (TCAD 2016).
 * [ ] **SAT sweeping и window-based оптимизация:** * Более глубокая версия FRAIG: выделяется ограниченное окно (cone глубины ≤ D вокруг узла), для него вычисляются локальные don't-cares, затем SAT-solver минимизирует функцию окна и реструктуризирует внутренние узлы. Позволяет убирать избыточность, не обнаруживаемую глобальной сигнатурной симуляцией FRAIG.
@@ -106,18 +100,9 @@
 ---
 
 ## Фаза 6: Реструктуризация проекта (Package Layout)
-*Разбиение плоского пакета на подпакеты по логическим слоям. Целесообразно выполнить после Phase 3.5 + Phase 5, когда файлов станет 35–40.*
+*Разбиение плоского пакета на подпакеты по логическим слоям.*
 
-* [ ] **Разбить `nand_optimizer/` на подпакеты:** Сгруппировать модули по роли:
-  - `nand_optimizer/core/` — `aig.py`, `expr.py`, `truth_table.py`, `implicant.py`
-  - `nand_optimizer/synthesis/` — `rewrite.py`, `fraig.py`, `balance.py`, `decomposition.py`, `dont_care.py`, `exact_synthesis.py`, `optimize.py`
-  - `nand_optimizer/mapping/` — `nand.py`, `circ_export.py`
-  - `nand_optimizer/io/` — `aiger_io.py`, `blif_io.py`, `dot_export.py`
-  - `nand_optimizer/sequential/` — `fsm.py` (+ Phase 3 additions)
-  - `nand_optimizer/datapath/` — `structural.py`, `datapath.py` (Phase 3.5)
-  - `nand_optimizer/testing/` — `tests.py`, `property_tests.py`, `benchmark_runner.py`, `epfl_bench.py`, `profile.py`
-  - Оркестраторы остаются на верхнем уровне: `pipeline.py`, `script.py`, `verify.py`, `__init__.py`, `__main__.py`
-  Предварительное условие: обновить все импорты, `CLAUDE.md`, убедиться что bootstrap `precompute_4cut.py` (env-guard + subprocess) не сломан при переезде в подпакет.
+Завершено: плоский пакет из 37 модулей разложен по 8 подпакетам (`core/`, `synthesis/`, `mapping/`, `io/`, `sequential/`, `datapath/`, `analysis/`, `testing/`); оркестраторы (`pipeline.py`, `script.py`, `verify.py`, `__init__.py`, `__main__.py`) плюс bootstrap-пара `aig_db_4.py`/`precompute_4cut.py` остались на верхнем уровне. Все `from nand_optimizer import ...` работают без изменений через re-export в `__init__.py`; env-guard subprocess-bootstrap `_NAND_OPTIMIZER_BOOTSTRAPPING` проверен на чистом перезапуске без `aig_db_4.py`. См. [TODO_done.md](TODO_done.md#фаза-6-реструктуризация-проекта-package-layout).
 
 ---
 

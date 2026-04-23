@@ -14,7 +14,7 @@ All functions return a fully-populated TruthTable ready for optimize().
 """
 
 from __future__ import annotations
-from ..truth_table import TruthTable
+from ..core.truth_table import TruthTable
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -39,7 +39,9 @@ StateTable / KISS2 FSM ─────────────┤ (excitation lo
 All outputs share a **single** gate network — cross-output sub-expression reuse is automatic.
 
 Steps 7–8 can be replaced by a user-supplied **synthesis script** (see below).
-Default script is `"rewrite; fraig; dc; rewrite; balance"`.
+Default script is `"rewrite; fraig; rewrite; balance"`. `dc` is not in the
+default; invoke it explicitly via `--script "... dc ..."`. For circuits with
+heavy reconvergent fanout use `--odc-mode z3-exact` (see [ROADMAP.md](ROADMAP.md) P0#1).
 
 ---
 
@@ -151,13 +153,17 @@ replacement for ABC or commercial EDA. Known gaps:
   Not competitive with ABC on throughput.
 - **QoR.** Typically within 1.5–3× of ABC on combinational area, depending on
   script and circuit class. No parity claim.
-- **Known-broken pass.** `dc --odc` has a soundness gap on circuits with heavy
-  reconvergent fanout: the safety-net miter reverts the whole pass on `router`,
-  `priority`, `i2c`, and `sin`, producing 0% QoR gain on these. The current
-  default script `"rewrite; fraig; dc; rewrite; balance"` silently no-ops on
-  such inputs. Fix is tracked in [ROADMAP.md](ROADMAP.md) P0#1 (removal from
-  default + root-cause patch). Until then, use a manual `--script` without
-  `dc` for reconvergent-heavy designs.
+- **`dc --odc` and reconvergent fanout.** The legacy sim-based ODC mode
+  cannot provide exhaustive admissibility coverage on circuits with 60–147 PIs
+  (e.g. `router`, `priority`, `i2c`), causing safety-net reverts and 0% QoR.
+  **Fix:** `dc --odc --odc-mode z3-exact` uses an exact Z3 admissibility proof
+  per cut — eliminates reverts on router (−2.3%), priority (−21.9%), i2c
+  (−0.1%). `sin` (5 416 ANDs) exceeds the 3 000-node threshold and falls back
+  to legacy automatically. A minimal regression fixture and three-invariant
+  soundness test live in [tests/](tests/). `dc` remains out of the default
+  script; opt in via `--script "... dc --odc --odc-mode z3-exact ..."`.
+  Speed cost: 4–27 s per benchmark vs. 0.2–2 s legacy. Full tracking:
+  [ROADMAP.md](ROADMAP.md) P0#1.
 - **Verilog front-end.** Supports a declared subset only: `module`, `input`,
   `output`, `wire`, `assign`, primitives (`and/or/nand/nor/xor/xnor/not/buf`),
   `always @(*)` with `if/else` and `case`. **Not supported:** `parameter`,
@@ -180,7 +186,7 @@ path for each is documented in [ROADMAP.md](ROADMAP.md).
 ## Synthesis Scripts
 
 The `--script` flag (and the `script=` API argument) replaces the built-in
-rewrite → FRAIG → DC → rewrite → balance sequence with a custom chain of AIG-level commands,
+rewrite → FRAIG → rewrite → balance sequence with a custom chain of AIG-level commands,
 mirroring the ABC-style synthesis flow.
 
 ```bash
@@ -229,6 +235,8 @@ python -m nand_optimizer mult4 --script "rewrite; fraig; dc -r 3 --dc-exact --od
 | `-C N`        | Care propagation rounds (fixed-point tightening) | 1 |
 | `--no-sdc`    | Disable satisfiability-DC pattern discovery | off |
 | `--odc`       | Enable sim-based observability-DC propagation (Mishchenko 2009) | off |
+| `--odc-mode M`| ODC computation: `legacy` (sim-based), `z3-exact` (exact Z3 per cut, recommended for circuits with reconvergent fanout), `window` (forward-flip local window), `hybrid` | `legacy` |
+| `--window-depth N` | Fanout window depth for `window` ODC mode | 5 |
 | `--dc-exact`  | Fall back to DC-masked exact synthesis for cuts > 4 | off |
 | `--no-resub`  | Disable 0-gate / 1-gate window resubstitution | off |
 
@@ -251,7 +259,7 @@ python -m nand_optimizer mult4 --script "rewrite; fraig; dc -r 3 --dc-exact --od
 result = optimize(tt, script="balance; rewrite; fraig; dc -r 3 --odc; balance; rewrite -z")
 ```
 
-When `script=None` (default), the built-in `"rewrite; fraig; dc; rewrite; balance"` sequence runs unchanged.
+When `script=None` (default), the built-in `"rewrite; fraig; rewrite; balance"` sequence runs unchanged. `dc` is currently excluded from the default (ROADMAP P0#1); request it explicitly in a custom script when you need it.
 
 ---
 
@@ -602,53 +610,72 @@ without touching the working tree.
 
 ## Project Structure
 
+The package is organised by layer; top-level orchestrators wire subpackages together. Every symbol listed in `nand_optimizer.__all__` is re-exported at the top, so `from nand_optimizer import X` works for all public API regardless of where the module actually lives.
+
 ```
 nand_optimizer/
-├── truth_table.py       # TruthTable — input: dict / function / .pla
-├── expr.py              # Boolean expression AST (Const, Lit, Not, And, Or)
-├── implicant.py         # Quine-McCluskey + cover selection (Espresso)
-├── optimize.py          # Phase assign, factorize, Shannon, elim_inv
-├── decomposition.py     # Ashenhurst-Curtis / Roth-Karp functional decomposition
-├── aig.py               # And-Inverter Graph (AIG) — structural hashing, GC
-├── rewrite.py           # Fanout-aware AIG rewriting (MFFC cut engine)
-├── exact_synthesis.py   # SAT-based exact synthesis (Z3, up to 5–6-input cuts)
-├── fraig.py             # FRAIGing — simulation + SAT equivalence merging
-├── dont_care.py         # Don't-care-aware rewrite (SDC + sim-based ODC, V2)
-├── bidec.py             # Disjoint-support bi-decomposition (AND/OR/XOR, k=5..8)
-├── bdd_decomp.py        # ROBDD rebuild via sifting + ITE realisation (needs `dd`)
-├── sat_resub.py         # Functional resubstitution for wide cuts (dc2-style)
-├── auto_compose.py      # Symmetric-output detection + hierarchical spec generator
-├── balance.py           # AIG depth balancing (area-preserving)
-├── script.py            # Synthesis script parser + executor + ScriptBandit (UCB1 / Thompson)
-├── aig_db_4.py          # Precomputed 4-input NPN template DB (auto-generated, gitignored)
-├── precompute_4cut.py   # Parallel generator for aig_db_4.py
-├── nand.py              # NANDBuilder — final NAND network + XOR/XNOR extraction
-├── pipeline.py          # Full multi-output pipeline (optimize() + hierarchical_optimize())
-├── fsm.py               # StateTable, Hopcroft + IS-FSM minimisation, state encoding,
-│                        # excitation logic, D/JK flip-flop backend, KISS2 parser
-├── structural.py        # StructuralModule — gate-level RTL construction (no TruthTable)
-├── datapath.py          # Parametric datapath blocks (adders, comparators, mux)
-├── verify.py            # Miter + BMC formal equivalence (Z3 / exhaustive / bounded unroll)
-├── tests.py             # Universal test suite (T1–T10)
-├── benchmark_runner.py  # MCNC regression runner
-├── property_tests.py    # Hypothesis-based random equivalence tests
-├── profile.py           # Per-pass time + memory profiler
-├── circ_export.py       # Logisim Evolution 4.x .circ exporter (combinational + FSM)
-├── dot_export.py        # Graphviz .dot AIG visualisation exporter
-├── aiger_io.py          # AIGER 1.9 reader/writer (ASCII .aag + binary .aig)
-├── blif_io.py           # Berkeley BLIF reader/writer (combinational subset)
-├── verilog_io.py        # Verilog front-end — structural + behavioural syntax (Phase 5)
-├── epfl_bench.py        # EPFL Combinational Benchmark Suite runner + audit
-├── sta.py               # Static Timing Analysis — arrival times, slack, critical path
-├── atpg.py              # Automatic Test Pattern Generation (stuck-at SAT)
-├── switching.py         # Switching Activity Estimation — power-aware metrics
 ├── __init__.py          # Public API (+ bootstrap for aig_db_4.py)
 ├── __main__.py          # CLI entry point
-└── examples/
-    ├── circuits.py      # seven_segment, two_bit_adder, bcd_to_excess3
-    ├── benchmarks.py    # MCNC: rd53, parity9, mult3, mult4, misex1, z4ml
-    ├── fsm_examples.py  # seq101, mod4, mod4_rst, redundant, partial
-    └── jk_counter.py    # 8-bit universal reversible JK counter (Phase 3.5)
+├── pipeline.py          # optimize() + hierarchical_optimize() — full multi-output pipeline
+├── script.py            # Synthesis script parser + executor + ScriptBandit (UCB1 / Thompson)
+├── verify.py            # Miter + BMC formal equivalence (Z3 / exhaustive / bounded unroll)
+├── auto_compose.py      # Symmetric-output detection + hierarchical spec generator
+├── precompute_4cut.py   # Parallel generator for aig_db_4.py (run as subprocess on first import)
+├── aig_db_4.py          # Precomputed 4-input NPN template DB (auto-generated, gitignored)
+│
+├── core/                # Core data structures
+│   ├── aig.py               # And-Inverter Graph — structural hashing, GC, snapshot/restore
+│   ├── expr.py              # Boolean expression AST (Const, Lit, Not, And, Or)
+│   ├── truth_table.py       # TruthTable — input: dict / function / .pla
+│   └── implicant.py         # Quine-McCluskey + cover selection (Espresso)
+│
+├── synthesis/           # Logic-synthesis passes
+│   ├── optimize.py          # Phase assign, factorize, Shannon, elim_inv
+│   ├── decomposition.py     # Ashenhurst-Curtis / Roth-Karp functional decomposition
+│   ├── rewrite.py           # Fanout-aware AIG rewriting (MFFC cut engine)
+│   ├── exact_synthesis.py   # SAT-based exact synthesis (Z3, up to 5–6-input cuts)
+│   ├── fraig.py             # FRAIGing — simulation + SAT equivalence merging
+│   ├── balance.py           # AIG depth balancing (area-preserving)
+│   ├── dont_care.py         # Don't-care-aware rewrite (SDC + sim-based ODC, V2/V3)
+│   ├── bidec.py             # Disjoint-support bi-decomposition (AND/OR/XOR, k=5..8)
+│   ├── bdd_decomp.py        # ROBDD rebuild via sifting + ITE realisation (needs `dd`)
+│   └── sat_resub.py         # Functional resubstitution for wide cuts (dc2-style)
+│
+├── mapping/             # AIG → NAND technology mapping
+│   ├── nand.py              # NANDBuilder — final NAND network + XOR/XNOR extraction
+│   └── circ_export.py       # Logisim Evolution 4.x .circ exporter (combinational + FSM)
+│
+├── io/                  # File-format interchange
+│   ├── aiger_io.py          # AIGER 1.9 reader/writer (ASCII .aag + binary .aig)
+│   ├── blif_io.py           # Berkeley BLIF reader/writer (combinational subset)
+│   ├── verilog_io.py        # Verilog front-end — structural + behavioural syntax
+│   └── dot_export.py        # Graphviz .dot AIG visualisation exporter
+│
+├── sequential/          # Sequential logic
+│   └── fsm.py               # StateTable, Hopcroft + IS-FSM minimisation, state encoding,
+│                            # excitation logic, D/JK flip-flop backend, KISS2 parser
+│
+├── datapath/            # Gate-level RTL construction
+│   ├── structural.py        # StructuralModule — gate-level RTL construction (no TruthTable)
+│   └── datapath.py          # Parametric datapath blocks (adders, comparators, mux)
+│
+├── analysis/            # Physical / testability analysis
+│   ├── sta.py               # Static Timing Analysis — arrival times, slack, critical path
+│   ├── switching.py         # Switching Activity Estimation — power-aware metrics
+│   └── atpg.py              # Automatic Test Pattern Generation (stuck-at SAT)
+│
+├── testing/             # Test suites, benchmarks, profiling
+│   ├── tests.py             # Universal test suite (T1–T10)
+│   ├── property_tests.py    # Hypothesis-based random equivalence tests
+│   ├── benchmark_runner.py  # MCNC regression runner
+│   ├── epfl_bench.py        # EPFL Combinational Benchmark Suite runner + audit
+│   └── profile.py           # Per-pass time + memory profiler
+│
+└── examples/            # Built-in sample circuits and FSMs
+    ├── circuits.py          # seven_segment, two_bit_adder, bcd_to_excess3
+    ├── benchmarks.py        # MCNC: rd53, parity9, mult3, mult4, misex1, z4ml
+    ├── fsm_examples.py      # seq101, mod4, mod4_rst, redundant, partial
+    └── jk_counter.py        # 8-bit universal reversible JK counter (Phase 3.5)
 ```
 
 ---
@@ -685,16 +712,16 @@ For circuits with > 20 inputs where truth-table enumeration is infeasible, build
 directly from RTL primitives and let the standard synthesis passes finish the job.
 
 ```python
-from nand_optimizer.structural import StructuralModule
-from nand_optimizer.datapath import adder, mux, comparator
+from nand_optimizer import StructuralModule
+from nand_optimizer.datapath.datapath import ripple_adder, mux2_bus, eq_comparator
 
 # 8-bit ripple-carry adder
 m = StructuralModule(n_inputs=16, input_names=[f'a{i}' for i in range(8)] + [f'b{i}' for i in range(8)])
-sums, cout = adder(m, m.inputs[:8], m.inputs[8:])
+sums, cout = ripple_adder(m, m.inputs[:8], m.inputs[8:])
 result = m.compile(output_lits=sums + [cout])
 
 # Arbitrary gate-level construction
-from nand_optimizer.structural import StructuralModule
+from nand_optimizer import StructuralModule
 m = StructuralModule(n_inputs=4)
 a, b, c, d = m.inputs
 ab  = m.make_and(a, b)

@@ -11,19 +11,19 @@ inspection and verification.
 from __future__ import annotations
 from typing import Dict, List, Optional
 
-from .truth_table   import TruthTable
-from .expr          import Expr, ZERO
-from .implicant     import Implicant, espresso, implicants_to_expr, int_to_bits
-from .optimize      import phase_assign, factorize
-from .implicant     import _expand_cubes_to_set
-from .decomposition import (DecompositionResult, ashenhurst_decompose,
-                             ashenhurst_decompose_recursive,
-                             RecursiveDecompositionResult,
-                             multi_output_decompose,
-                             SharedDecompositionResult)
-from .nand          import (NANDBuilder, Gate, dead_code_elimination,
-                            eval_network, nand_gate_count)
-from .profile       import ProfileReport, profile_pass
+from .core.truth_table       import TruthTable
+from .core.expr              import Expr, ZERO
+from .core.implicant         import Implicant, espresso, implicants_to_expr, int_to_bits
+from .synthesis.optimize      import phase_assign, factorize
+from .core.implicant         import _expand_cubes_to_set
+from .synthesis.decomposition import (DecompositionResult, ashenhurst_decompose,
+                                      ashenhurst_decompose_recursive,
+                                      RecursiveDecompositionResult,
+                                      multi_output_decompose,
+                                      SharedDecompositionResult)
+from .mapping.nand            import (NANDBuilder, Gate, dead_code_elimination,
+                                      eval_network, nand_gate_count)
+from .testing.profile         import ProfileReport, profile_pass
 
 
 # -------------------------------------------------------------------------------
@@ -129,7 +129,7 @@ def _phase2(
     r.expr_shan  = r.expr_fact
     r.expr_clean = r.expr_fact
 
-    from .nand import expr_to_aig
+    from .mapping.nand import expr_to_aig
 
     # Shared-support path: h's have already been pushed into the AIG by the
     # caller and r.expr_fact is g_j(h-names, X_free).  Just build g_j.
@@ -217,7 +217,7 @@ def _optimize_output(
     builder: NANDBuilder,
     verbose: bool = False,
 ) -> OutputResult:
-    from .optimize import phase_assign as _phase_assign, apply_shannon, elim_inv
+    from .synthesis.optimize import phase_assign as _phase_assign, apply_shannon, elim_inv
 
     on_cubes = tt.ones_cubes(out_idx)
     dc_cubes = tt.dc_cubes
@@ -317,7 +317,7 @@ def optimize(tt: TruthTable, verbose: bool = True,
 
     # Phase 2.2 Cross-output Factorization
     try:
-        from .optimize import cross_output_factorize
+        from .synthesis.optimize import cross_output_factorize
         facts_before = [result.outputs[name].expr_fact for name in tt.output_names]
         with profile_pass('Cross-output factorization', report):
             facts_after = cross_output_factorize(facts_before)
@@ -336,8 +336,16 @@ def optimize(tt: TruthTable, verbose: bool = True,
     # Phase 2: per-output steps [4]-[6] -------------------------------------
     builder._aig = getattr(builder, '_aig', None)
     if builder._aig is None:
-        from .aig import AIG
+        from .core.aig import AIG
         builder._aig = AIG()
+
+    # Pre-register primary inputs in tt.input_names order so the AIG's input
+    # ordering (and thus downstream .circ pin layout / Logisim TT-export
+    # column order) matches the user's declared order. Without this, inputs
+    # are created lazily by expr_to_aig in first-occurrence order, which
+    # depends on which variables happen to appear in the first SOP cube.
+    for _name in tt.input_names:
+        builder._aig.make_input(_name)
 
     # Phase 2.3: Shared-support Ashenhurst-Curtis across all outputs ---------
     #
@@ -378,7 +386,7 @@ def optimize(tt: TruthTable, verbose: bool = True,
         snap_shared = aig.snapshot()
         size0 = aig.n_ands
 
-        from .nand import expr_to_aig
+        from .mapping.nand import expr_to_aig
         dmap_shared: Dict[str, int] = {}
         for hn, he in zip(shared.h_names, shared.h_exprs):
             dmap_shared[hn] = expr_to_aig(factorize(he), aig, var_map=dmap_shared)
@@ -465,7 +473,7 @@ def optimize(tt: TruthTable, verbose: bool = True,
         if verbose:
             print("\n  [7] Local AIG Rewriting (fanout-aware)")
 
-        from .rewrite import rewrite_aig
+        from .synthesis.rewrite import rewrite_aig
         with profile_pass('AIG rewriting', report,
                           detail=f'{builder._aig.n_nodes} input nodes'):
             new_aig, new_out_lits = rewrite_aig(builder._aig,
@@ -476,7 +484,7 @@ def optimize(tt: TruthTable, verbose: bool = True,
             print(f"      AIG nodes: {builder._aig.n_nodes} -> {new_aig.n_nodes}")
 
         # Phase 3.5: FRAIGing — simulation + SAT equivalence merging ----------
-        from .fraig import fraig as _fraig
+        from .synthesis.fraig import fraig as _fraig
         _before_fraig = new_aig.n_nodes
         with profile_pass('FRAIGing', report, detail=f'{new_aig.n_nodes} nodes'):
             new_aig, new_out_lits = _fraig(new_aig, new_out_lits)
@@ -484,31 +492,25 @@ def optimize(tt: TruthTable, verbose: bool = True,
             print(f"\n  [7.5] FRAIGing (simulation + SAT equivalence merging)")
             print(f"      AIG nodes: {_before_fraig} -> {new_aig.n_nodes}")
 
-        # Phase 3.7: Don't-Care-based rewriting (SDC + windowed ODC) ----------
-        from .dont_care import dc_optimize
-        _before_dc = new_aig.n_nodes
-        with profile_pass("Don't-care rewriting", report,
-                          detail=f'{new_aig.n_nodes} nodes'):
-            new_aig, new_out_lits = dc_optimize(new_aig, new_out_lits)
-        if verbose:
-            print(f"\n  [7.7] Don't-Care Rewriting (SDC)")
-            print(f"      AIG nodes: {_before_dc} -> {new_aig.n_nodes}")
-
-        # Phase 3.8: second rewrite sweep picks up the DC-exposed reductions --
-        from .rewrite import rewrite_aig as _rewrite
+        # Phase 3.7: second rewrite sweep picks up FRAIG-exposed reductions.
+        # ``dc_optimize`` used to run between FRAIG and this sweep, but has
+        # been removed from the default path pending the ``--odc`` soundness
+        # fix (see ROADMAP.md P0#1). Invoke ``dc`` explicitly via ``--script``
+        # when you need it.
+        from .synthesis.rewrite import rewrite_aig as _rewrite
         _before_rw2 = new_aig.n_nodes
-        with profile_pass('AIG rewriting (post-DC)', report,
+        with profile_pass('AIG rewriting (post-FRAIG)', report,
                           detail=f'{new_aig.n_nodes} nodes'):
             new_aig, new_out_lits = _rewrite(new_aig,
                                               out_lits=new_out_lits,
                                               rounds=1)
         if verbose:
-            print(f"\n  [7.8] Local AIG Rewriting (post-DC)")
+            print(f"\n  [7.7] Local AIG Rewriting (post-FRAIG)")
             print(f"      AIG nodes: {_before_rw2} -> {new_aig.n_nodes}")
 
         # Phase 4: AIG Balancing (depth reduction) ----------------------------
         if balance:
-            from .balance import balance_aig, aig_depth
+            from .synthesis.balance import balance_aig, aig_depth
             depth_before = aig_depth(new_aig, new_out_lits)
             bal_aig, bal_out_lits = balance_aig(new_aig, new_out_lits)
             depth_after  = aig_depth(bal_aig, bal_out_lits)
@@ -525,7 +527,7 @@ def optimize(tt: TruthTable, verbose: bool = True,
     result.out_lits = new_out_lits
 
     # [9] Final NAND Topology Emission (with XOR extraction) ----------------
-    from .nand import aig_to_gates
+    from .mapping.nand import aig_to_gates
     with profile_pass('AIG -> NAND mapping', report,
                       detail=f'{new_aig.n_nodes} nodes'):
         final_gates, out_wires, n_xor = aig_to_gates(new_aig, new_out_lits)
@@ -547,13 +549,13 @@ def optimize(tt: TruthTable, verbose: bool = True,
     result.total_nand = nand_gate_count(builder.gates)
 
     # [10] Static Timing Analysis ------------------------------------------
-    from .sta import compute_sta
+    from .analysis.sta import compute_sta
     sta = compute_sta(result)
     if verbose:
         sta.print_summary(output_names=list(tt.output_names))
 
     # [11] Switching Activity Estimation -----------------------------------
-    from .switching import estimate_switching as _est_sw
+    from .analysis.switching import estimate_switching as _est_sw
     sw = _est_sw(new_aig, new_out_lits, output_names=list(tt.output_names))
     result.switching = sw
     if verbose:
@@ -612,6 +614,8 @@ def hierarchical_optimize(
     stage_specs: list,
     post_script: Optional[str] = None,
     verbose: bool = True,
+    bandit_horizon: int = 0,
+    bandit_strategy: str = 'ucb1',
 ) -> 'OptimizeResult':
     """
     Multi-stage hierarchical synthesis.
@@ -633,9 +637,9 @@ def hierarchical_optimize(
          "rewrite; fraig; balance; rewrite -z; fraig; balance").
       4. Map to NAND gates and return an OptimizeResult.
     """
-    from .script import run_script
-    from .nand   import aig_to_gates, nand_gate_count, NANDBuilder
-    from .aig    import AIG
+    from .script       import run_script
+    from .mapping.nand import aig_to_gates, nand_gate_count, NANDBuilder
+    from .core.aig     import AIG
 
     default_stage_script = "rewrite; fraig; balance; rewrite -z; fraig; balance"
     if post_script is None:
@@ -714,10 +718,23 @@ def hierarchical_optimize(
     if verbose:
         print(f"\n  [hierarchical] Combined AIG: {combined_aig.n_ands} AND nodes, "
               f"{len(combined_out_lits)} outputs")
-        print(f"  [hierarchical] Post-script: {post_script!r}")
+        if bandit_horizon > 0:
+            print(f"  [hierarchical] Bandit synthesis "
+                  f"(strategy={bandit_strategy!r}, horizon={bandit_horizon})")
+        else:
+            print(f"  [hierarchical] Post-script: {post_script!r}")
 
-    new_aig, new_out_lits = run_script(
-        combined_aig, combined_out_lits, post_script, verbose)
+    if bandit_horizon > 0:
+        from .script import run_bandit
+        new_aig, new_out_lits, _bandit = run_bandit(
+            combined_aig, combined_out_lits,
+            horizon=bandit_horizon,
+            strategy=bandit_strategy,
+            verbose=verbose,
+        )
+    else:
+        new_aig, new_out_lits = run_script(
+            combined_aig, combined_out_lits, post_script, verbose)
 
     if verbose:
         print(f"\n  [hierarchical] After script: {new_aig.n_ands} AND nodes")
