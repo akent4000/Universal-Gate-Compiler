@@ -7,6 +7,7 @@ Node types:
   Not(arg)        — inversion
   And(*args)      — conjunction
   Or(*args)       — disjunction
+  Xor(a, b)       — exclusive-or (2-input)
 """
 
 from __future__ import annotations
@@ -142,6 +143,35 @@ class Or(Expr):
     def __hash__(self):     return hash(('Or', tuple(self.args)))
 
 
+class Xor(Expr):
+    """2-input exclusive-or expression."""
+    __slots__ = ('a', 'b')
+
+    def __init__(self, a: Expr, b: Expr):
+        self.a = a
+        self.b = b
+
+    def eval(self, asgn: Dict[str, int]) -> int:
+        return self.a.eval(asgn) ^ self.b.eval(asgn)
+
+    def literals(self):      return self.a.literals() + self.b.literals()
+    def vars(self):          return self.a.vars() | self.b.vars()
+
+    def sub(self, var: str, val: int) -> Expr:
+        return simp(Xor(self.a.sub(var, val), self.b.sub(var, val)))
+
+    def __str__(self):
+        la = f'({self.a})' if isinstance(self.a, (And, Or)) else str(self.a)
+        lb = f'({self.b})' if isinstance(self.b, (And, Or)) else str(self.b)
+        return f'{la} ^ {lb}'
+
+    def __eq__(self, o):
+        return isinstance(o, Xor) and self.a == o.a and self.b == o.b
+
+    def __hash__(self):
+        return hash(('Xor', self.a, self.b))
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Simplifier
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -174,5 +204,15 @@ def simp(e: Expr) -> Expr:
         if a == ZERO:           return ONE
         if isinstance(a, Not):  return simp(a.arg)
         return Not(a)
+
+    if isinstance(e, Xor):
+        a = simp(e.a)
+        b = simp(e.b)
+        if a == ZERO: return b
+        if b == ZERO: return a
+        if a == ONE:  return simp(Not(b))
+        if b == ONE:  return simp(Not(a))
+        if a == b:    return ZERO
+        return Xor(a, b)
 
     return e

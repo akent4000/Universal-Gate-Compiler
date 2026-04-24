@@ -1,8 +1,9 @@
 """
-And-Inverter Graph (AIG) — canonical Boolean function representation.
+XOR-And-Inverter Graph (XAG) — canonical Boolean function representation.
 
-All Boolean functions are encoded using only:
+All Boolean functions are encoded using:
   • 2-input AND nodes
+  • 2-input XOR nodes  ← first-class, not expanded to 3 ANDs
   • Complemented edges (inversions are free — just flip a bit)
 
 Literal encoding (AIGER convention):
@@ -10,8 +11,8 @@ Literal encoding (AIGER convention):
   FALSE = 0   (constant-zero literal)
   TRUE  = 1   (constant-one literal, i.e. NOT(FALSE))
 
-Structural hashing: AND(a, b) and AND(b, a) map to the same node.
-Constant propagation is built into make_and.
+Structural hashing: AND(a,b) and AND(b,a) map to the same node; same for XOR.
+Constant propagation is built into make_and and make_xor.
 """
 
 from __future__ import annotations
@@ -34,22 +35,24 @@ TRUE:  Lit = 1   # constant-one literal
 
 class AIG:
     """
-    Incrementally-built And-Inverter Graph with structural hashing.
+    Incrementally-built XOR-And-Inverter Graph with structural hashing.
 
     Nodes are numbered starting from 1 (node 0 = implicit constant).
-    Each node is either a primary input or a 2-input AND gate.
-    Inversions are represented as the complement bit of a literal, so
-    NOT(x) = x ^ 1 — no extra node needed.
+    Each node is either a primary input, a 2-input AND gate, or a 2-input
+    XOR gate.  Inversions are represented as the complement bit of a literal,
+    so NOT(x) = x ^ 1 — no extra node needed.
 
-    The _nodes list stores entries in topological order so that the AIG
+    The _nodes list stores entries in topological order so that the graph
     can be converted to a gate list by a single forward pass.
     """
 
     def __init__(self):
-        # Each entry: ('input', name) | ('and', lit_a, lit_b)
+        # Each entry: ('input', name) | ('and', lit_a, lit_b) | ('xor', lit_a, lit_b)
         self._nodes:      List                  = []
-        # Structural hash: (normalized_lit_a, normalized_lit_b) → output_lit
+        # Structural hash for AND: (normalized_lit_a, normalized_lit_b) → output_lit
         self._hash:       Dict[Tuple[Lit, Lit], Lit] = {}
+        # Structural hash for XOR: (normalized_lit_a, normalized_lit_b) → output_lit
+        self._xhash:      Dict[Tuple[Lit, Lit], Lit] = {}
         # Primary input name → positive literal
         self._input_lits: Dict[str, Lit]        = {}
 
@@ -61,7 +64,12 @@ class AIG:
 
     @property
     def n_ands(self) -> int:
+        """Total gate nodes (AND + XOR). Name kept for backward compatibility."""
         return len(self._nodes) - len(self._input_lits)
+
+    @property
+    def n_xors(self) -> int:
+        return sum(1 for e in self._nodes if e[0] == 'xor')
 
     @property
     def n_nodes(self) -> int:
@@ -119,6 +127,37 @@ class AIG:
         self._hash[key] = out_lit
         return out_lit
 
+    def make_xor(self, a: Lit, b: Lit) -> Lit:
+        """
+        Return a native first-class XOR node for XOR(a, b).
+
+        Constant propagation + structural hashing.  Canonical form: smaller
+        literal first.  The result is the positive literal of the XOR node;
+        complement with ^ 1 to get XNOR.
+        """
+        # Constant propagation
+        if a == FALSE:    return b
+        if b == FALSE:    return a
+        if a == TRUE:     return b ^ 1
+        if b == TRUE:     return a ^ 1
+        if a == b:        return FALSE
+        if a == (b ^ 1):  return TRUE
+
+        # Commutative normalization
+        if a > b:
+            a, b = b, a
+
+        key = (a, b)
+        if key in self._xhash:
+            return self._xhash[key]
+
+        # New XOR node
+        node_id = len(self._nodes) + 1
+        self._nodes.append(('xor', a, b))
+        out_lit = node_id * 2
+        self._xhash[key] = out_lit
+        return out_lit
+
     def make_not(self, a: Lit) -> Lit:
         """Complement a literal — O(1), no new node."""
         return a ^ 1
@@ -133,21 +172,33 @@ class AIG:
         """NAND(a, b) = ~AND(a, b)."""
         return self.make_not(self.make_and(a, b))
 
-    def make_xor(self, a: Lit, b: Lit) -> Lit:
-        """XOR(a, b) = (a & ~b) | (~a & b)."""
-        return self.make_or(
-            self.make_and(a, self.make_not(b)),
-            self.make_and(self.make_not(a), b),
-        )
+    # ── cache inspection (non-mutating) ──────────────────────────────────────
+
+    def has_and(self, a: Lit, b: Lit) -> bool:
+        """Return True if AND(a, b) is already in the structural hash."""
+        if a > b:
+            a, b = b, a
+        return (a, b) in self._hash
+
+    def get_and(self, a: Lit, b: Lit) -> Optional[Lit]:
+        """Return the cached literal for AND(a, b), or None if not present."""
+        if a > b:
+            a, b = b, a
+        return self._hash.get((a, b))
+
+    def has_xor(self, a: Lit, b: Lit) -> bool:
+        """Return True if XOR(a, b) is already in the structural hash."""
+        if a > b:
+            a, b = b, a
+        return (a, b) in self._xhash
+
+    def get_xor(self, a: Lit, b: Lit) -> Optional[Lit]:
+        """Return the cached literal for XOR(a, b), or None if not present."""
+        if a > b:
+            a, b = b, a
+        return self._xhash.get((a, b))
 
     # ── speculative construction (snapshot / restore) ────────────────────────
-    #
-    # Used by passes that want to try several alternative sub-networks and
-    # pick the one that grows the AIG the least.  snapshot() captures the
-    # node count + input table; restore(snap) truncates _nodes back to that
-    # state, drops any inputs created after the snapshot, and reconstructs
-    # _hash from the surviving AND nodes.  Literals obtained *before* the
-    # snapshot stay valid; literals issued *after* it must be discarded.
 
     def snapshot(self) -> Tuple[int, List[str]]:
         """Capture current AIG state for a later restore()."""
@@ -165,12 +216,19 @@ class AIG:
         self._input_lits = kept
 
         self._hash.clear()
+        self._xhash.clear()
         for i, entry in enumerate(self._nodes):
+            nid_lit = (i + 1) * 2
             if entry[0] == 'and':
                 _, a, b = entry
                 if a > b:
                     a, b = b, a
-                self._hash[(a, b)] = (i + 1) * 2
+                self._hash[(a, b)] = nid_lit
+            elif entry[0] == 'xor':
+                _, a, b = entry
+                if a > b:
+                    a, b = b, a
+                self._xhash[(a, b)] = nid_lit
 
     # ── garbage collection ───────────────────────────────────────────────────
 
@@ -179,12 +237,9 @@ class AIG:
         Return a compacted copy containing only nodes reachable from out_lits.
 
         Dead nodes (translated but never referenced by any output) are removed
-        from both _nodes and _hash.  Structural hashing in the rebuilt AIG may
-        additionally merge node pairs that happen to become identical after
-        dead-code removal.
-
-        Typical caller: rewrite_aig(), once per round, to prevent phantom
-        MFFC-child translations from bloating the hash table.
+        from both _nodes, _hash, and _xhash.  Structural hashing in the rebuilt
+        AIG may additionally merge node pairs that happen to become identical
+        after dead-code removal.
         """
         # DFS from outputs to mark reachable node IDs.
         reachable: set = set()
@@ -195,7 +250,7 @@ class AIG:
                 continue
             reachable.add(nid)
             entry = self._nodes[nid - 1]
-            if entry[0] == 'and':
+            if entry[0] in ('and', 'xor'):
                 _, a_lit, b_lit = entry
                 for child_lit in (a_lit, b_lit):
                     ch = self.node_of(child_lit)
@@ -211,9 +266,12 @@ class AIG:
                 continue
             if entry[0] == 'input':
                 nlit = new_aig.make_input(entry[1])
-            else:
+            elif entry[0] == 'and':
                 _, a_lit, b_lit = entry
                 nlit = new_aig.make_and(lit_map[a_lit], lit_map[b_lit])
+            else:  # 'xor'
+                _, a_lit, b_lit = entry
+                nlit = new_aig.make_xor(lit_map[a_lit], lit_map[b_lit])
             lit_map[nid * 2]     = nlit
             lit_map[nid * 2 + 1] = nlit ^ 1
 
@@ -239,23 +297,12 @@ class AIG:
             if entry[0] == 'input':
                 name = entry[1]
                 nlit = substitution.get(name, self.make_input(name))
-            else:
+            elif entry[0] == 'and':
                 _, a_lit, b_lit = entry
                 nlit = self.make_and(lit_map[a_lit], lit_map[b_lit])
+            else:  # 'xor'
+                _, a_lit, b_lit = entry
+                nlit = self.make_xor(lit_map[a_lit], lit_map[b_lit])
             lit_map[nid * 2]     = nlit
             lit_map[nid * 2 + 1] = nlit ^ 1
         return lit_map
-
-    # ── cache inspection (non-mutating) ──────────────────────────────────────
-
-    def has_and(self, a: Lit, b: Lit) -> bool:
-        """Return True if AND(a, b) is already in the structural hash."""
-        if a > b:
-            a, b = b, a
-        return (a, b) in self._hash
-
-    def get_and(self, a: Lit, b: Lit) -> Optional[Lit]:
-        """Return the cached literal for AND(a, b), or None if not present."""
-        if a > b:
-            a, b = b, a
-        return self._hash.get((a, b))

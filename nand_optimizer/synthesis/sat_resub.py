@@ -162,7 +162,7 @@ def _simulate_over_cut(
         vb = tt[idb]
         if aig.is_complemented(b_lit):
             vb = (~vb) & mask
-        tt[nid] = va & vb
+        tt[nid] = va ^ vb if entry[0] == 'xor' else va & vb
 
     return tt
 
@@ -242,7 +242,7 @@ def _select_divisors(
             continue
         # Skip primary-input nodes (already covered via cut list above).
         entry = aig._nodes[nid - 1]
-        if entry[0] != 'and':
+        if entry[0] not in ('and', 'xor'):
             continue
         divisors.append(nid)
         if len(divisors) >= max_divisors:
@@ -313,6 +313,13 @@ def resub_aig(
             old_id = i + 1
             if entry[0] == 'input':
                 nlit = new_aig.make_input(entry[1])
+                lit_map[old_id * 2]     = nlit
+                lit_map[old_id * 2 + 1] = nlit ^ 1
+                continue
+
+            if entry[0] == 'xor':
+                _, old_a, old_b = entry
+                nlit = new_aig.make_xor(lit_map[old_a], lit_map[old_b])
                 lit_map[old_id * 2]     = nlit
                 lit_map[old_id * 2 + 1] = nlit ^ 1
                 continue

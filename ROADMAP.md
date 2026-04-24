@@ -246,30 +246,50 @@ silent-miscompile.
 
 ## P3 — Следующий реальный unlock
 
-### 8. XAG (XOR-AND Graph) как основное расширение AIG
+### 8. ~~XAG (XOR-AND Graph) как основное расширение AIG~~ ✅ ВЫПОЛНЕНО (Phase 1–4)
 
-**Мотивация.** AIG моделирует XOR как 3 AND'а с инверсиями. Structural
-hashing не канонизирует их до одной формы → FRAIG и rewrite видят дубликаты,
-которых быть не должно. Это самая очевидная причина отставания по QoR от ABC
-на арифметике (adder/multiplier/sha). MIG — отдельная тема, не делать одновременно.
+**Решение.** XOR поднят из «3-AND expansion, детектируемый на этапе маппинга» до
+полноправного графового примитива по всему пайплайну.
 
-**Путь исправления (поэтапно):**
-1. **XAG-lite в AIG:** добавить `XORNode(a, b)` как первоклассный узел с
-   key = `('XOR', min(a^1, a), min(b^1, b))` (канонизация по полярности).
-   Constant folding: `XOR(x, 0) = x`, `XOR(x, 1) = ~x`, `XOR(x, x) = 0`.
-2. **FRAIG-симуляция:** add XOR as native op (дешевле чем 3×AND).
-3. **Rewrite:** расширить `aig_to_gates` / `nand.py` detector — XOR-pattern
-   напрямую из XAG-узла, а не reverse-engineering из AND-tree.
-4. **NPN DB:** `aig_db_4.py` содержит XOR-heavy NPN классы как AND-trees;
-   после XAG надо пересобрать DB с XOR-узлами для этих классов (меньше
-   записей, меньше размер).
+**Что сделано:**
 
-**Риск:** все существующие проходы (rewrite, balance, fraig) должны уметь
-обрабатывать XOR-узел. Это **ломающий рефакторинг API AIG** — заложить
-неделю работы минимум, плюс регрессионные T1–T10.
+1. **Core (AIG→XAG):** в [core/aig.py](nand_optimizer/core/aig.py) добавлен
+   словарь `_xhash`, нативный `make_xor(a, b)` с константной пропагацией и
+   structural hashing, accessors `has_xor()` / `get_xor()`, свойство `n_xors`.
+   `gc()`, `compose()`, `snapshot()` / `restore()` обрабатывают `('xor', a, b)`
+   записи наравне с `('and', a, b)`.
+2. **Expr:** добавлен класс `Xor(a, b)` в [core/expr.py](nand_optimizer/core/expr.py);
+   `simp()` распространяет константы через XOR (`x^0=x`, `x^1=~x`, `x^x=0`).
+3. **Mapping:** `expr_to_aig()` эмитит `aig.make_xor()` для `Xor`-узлов вместо
+   3 AND; `aig_to_gates()` эмитит канонический 4-NAND XOR (pos_lit = XOR output;
+   neg_lit = XNOR с доп. инвертором); `_compute_needed_lits()` и блоки
+   re-expand в шагах 3/4 обрабатывают `('xor', …)` записи.
+4. **Synthesis passes:** все проходы (`rewrite`, `fraig`, `balance`, `dont_care`,
+   `sat_resub`, `bdd_decomp`, `bidec`) знают про `('xor', …)`-узлы. Care
+   propagation: XOR всегда чувствителен к обоим входам (`care[a] |= care[y]`).
+5. **XAG_DB_4:** новые файлы [precompute_xag_db.py](nand_optimizer/precompute_xag_db.py)
+   + [xag_db_4.py](nand_optimizer/xag_db_4.py) — BFS по всем 4-входовым
+   функциям с AND и XOR на каждом уровне стоимости. Формат шаблонов:
+   `(a_lit, b_lit, op_kind)` где `op_kind ∈ {0=AND, 1=XOR}`. Результаты:
+   **87% из 65 536 truth tables дешевле в XAG** (57 382 cheaper, 8 154 same);
+   средняя глубина шаблона: 7.76 → 5.21 ops; max 15 → 7. Опция `use_xag=True`
+   в `rewrite_aig()` — по умолчанию выключена до реализации NAND-cost-aware
+   компаратора шаблонов (текущий сравнивает по `len(ops)`, что не учитывает
+   4-NAND стоимость XOR-узлов).
+6. **I/O:** AIGER writer (`io/aiger_io.py`) раскрывает XOR→3 AND перед записью
+   (формат поддерживает только AND); DOT export (`io/dot_export.py`) рисует
+   XOR оранжевым ромбом с `⊕` меткой.
 
-**Готово, когда:** EPFL `arithmetic/*` показывает 10–20% снижение AIG-узлов
-по сравнению с чистым AIG-бэкендом.
+**Регрессия:** 25/25 pytest-тестов проходят, все built-in схемы (7seg 62/62,
+adder 41/41, excess3, rd53 и др.) проходят T1–T13, QoR baseline не нарушен.
+
+**Оставшееся (Phase 5+, опционально):**
+- NAND-cost-aware compar в `rewrite_aig` (AND=2, XOR=4 NAND-gates), чтобы
+  включить `use_xag=True` по умолчанию без регрессии.
+- XOR-aware Don't-Care reasoning (самодуальность XOR).
+- BLIF/Verilog writers, эмитящие XOR-операторы напрямую.
+- EPFL `arithmetic/*`-прогоны для измерения QoR-выигрыша от нативных XOR
+  при `use_xag=True`.
 
 ---
 
@@ -304,7 +324,7 @@ P2#6 (Verilog subset spec)
 P2#7 (pass QoR eval)
          │
          ▼
-P3#8 (XAG)
+P3#8 (XAG)                 ✅
          │
          ▼
 P3#9 (MIG / GPU / ML — по готовности)

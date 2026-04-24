@@ -87,7 +87,7 @@ def _build_fanout_index(aig: AIG) -> Dict[int, List[int]]:
     fanout: Dict[int, List[int]] = {i + 1: [] for i in range(aig.n_nodes)}
     for i, entry in enumerate(aig._nodes):
         nid = i + 1
-        if entry[0] == 'and':
+        if entry[0] in ('and', 'xor'):
             _, a_lit, b_lit = entry
             ia = aig.node_of(a_lit)
             ib = aig.node_of(b_lit)
@@ -135,7 +135,7 @@ def _propagate_care_sim(
 
     for i in range(aig.n_nodes - 1, -1, -1):
         entry = aig._nodes[i]
-        if entry[0] != 'and':
+        if entry[0] not in ('and', 'xor'):
             continue
         nid = i + 1
         cy = care[nid]
@@ -144,16 +144,23 @@ def _propagate_care_sim(
         _, a_lit, b_lit = entry
         ia = aig.node_of(a_lit)
         ib = aig.node_of(b_lit)
-        sa = sig_old.get(ia, 0)
-        if aig.is_complemented(a_lit):
-            sa = (~sa) & MASK
-        sb = sig_old.get(ib, 0)
-        if aig.is_complemented(b_lit):
-            sb = (~sb) & MASK
-        if ia > 0:
-            care[ia] |= cy & sb
-        if ib > 0:
-            care[ib] |= cy & sa
+        if entry[0] == 'xor':
+            # XOR is always sensitive to both inputs regardless of sibling value
+            if ia > 0:
+                care[ia] |= cy
+            if ib > 0:
+                care[ib] |= cy
+        else:
+            sa = sig_old.get(ia, 0)
+            if aig.is_complemented(a_lit):
+                sa = (~sa) & MASK
+            sb = sig_old.get(ib, 0)
+            if aig.is_complemented(b_lit):
+                sb = (~sb) & MASK
+            if ia > 0:
+                care[ia] |= cy & sb
+            if ib > 0:
+                care[ib] |= cy & sa
     return care
 
 
@@ -223,7 +230,7 @@ def _propagate_care_sim_hybrid(
 
     for i in range(aig.n_nodes - 1, -1, -1):
         entry = aig._nodes[i]
-        if entry[0] != 'and':
+        if entry[0] not in ('and', 'xor'):
             continue
         nid = i + 1
         cy = care[nid]
@@ -232,12 +239,18 @@ def _propagate_care_sim_hybrid(
         _, a_lit, b_lit = entry
         ia = aig.node_of(a_lit)
         ib = aig.node_of(b_lit)
-        sa = current_sig(ia, a_lit)
-        sb = current_sig(ib, b_lit)
-        if ia > 0:
-            care[ia] |= cy & sb
-        if ib > 0:
-            care[ib] |= cy & sa
+        if entry[0] == 'xor':
+            if ia > 0:
+                care[ia] |= cy
+            if ib > 0:
+                care[ib] |= cy
+        else:
+            sa = current_sig(ia, a_lit)
+            sb = current_sig(ib, b_lit)
+            if ia > 0:
+                care[ia] |= cy & sb
+            if ib > 0:
+                care[ib] |= cy & sa
     return care
 
 
@@ -294,7 +307,7 @@ def _propagate_care_sim_window(
 
     for seed_nid in range(1, aig.n_nodes + 1):
         entry = aig._nodes[seed_nid - 1]
-        if entry[0] != 'and':
+        if entry[0] not in ('and', 'xor'):
             continue
         if seed_nid in po_nids:
             # care[PO] is already MASK, flipping is always observable
@@ -312,7 +325,7 @@ def _propagate_care_sim_window(
                     if child_nid in flipped:
                         continue  # already processed at an earlier level (reconvergence)
                     child_entry = aig._nodes[child_nid - 1]
-                    if child_entry[0] != 'and':
+                    if child_entry[0] not in ('and', 'xor'):
                         continue
                     _, la, lb = child_entry
                     ia, ib = aig.node_of(la), aig.node_of(lb)
@@ -322,7 +335,7 @@ def _propagate_care_sim_window(
                     sb = flipped.get(ib, sig_old.get(ib, 0))
                     if aig.is_complemented(lb):
                         sb = (~sb) & MASK
-                    fs = sa & sb
+                    fs = sa ^ sb if child_entry[0] == 'xor' else sa & sb
                     flipped[child_nid] = fs
                     next_level.append(child_nid)
                     # If this child is a PO, observe the flip immediately.
@@ -501,12 +514,13 @@ def _sync_z3_new(
     for i in range(n_before, new_aig.n_nodes):
         nid = i + 1
         entry = new_aig._nodes[i]
-        if entry[0] == 'and' and nid not in z3_exprs_new:
+        if entry[0] in ('and', 'xor') and nid not in z3_exprs_new:
             _, la, lb = entry
             ea = _z3_of_lit(la)
             eb = _z3_of_lit(lb)
             if ea is not None and eb is not None:
-                z3_exprs_new[nid] = _z3.And(ea, eb)
+                z3_exprs_new[nid] = (_z3.Xor(ea, eb) if entry[0] == 'xor'
+                                     else _z3.And(ea, eb))
 
 
 def _z3_resub_admissible(
@@ -580,16 +594,24 @@ def _sync_sig_new(
     (inputs = 0, ANDs = max(fanin levels) + 1) for use by the topology-aware
     resub window in :func:`_scan_resub_1gate`.
     """
+    MASK_S = (1 << W) - 1
     for i in range(n_before, aig_new.n_nodes):
         nid = i + 1
         entry = aig_new._nodes[i]
-        if entry[0] == 'and' and nid not in sig_new:
+        if entry[0] in ('and', 'xor') and nid not in sig_new:
             _, la, lb = entry
-            sig_new[nid] = _and_signature(sig_new, la, lb, aig_new, W)
+            if entry[0] == 'xor':
+                def _sig_lit(lit):
+                    n = aig_new.node_of(lit)
+                    s = sig_new.get(n, 0) if n > 0 else 0
+                    return ((~s) & MASK_S) if aig_new.is_complemented(lit) else s
+                sig_new[nid] = _sig_lit(la) ^ _sig_lit(lb)
+            else:
+                sig_new[nid] = _and_signature(sig_new, la, lb, aig_new, W)
         if level_new is not None and nid not in level_new:
             if entry[0] == 'input':
                 level_new[nid] = 0
-            elif entry[0] == 'and':
+            elif entry[0] in ('and', 'xor'):
                 _, la, lb = entry
                 na = aig_new.node_of(la)
                 nb = aig_new.node_of(lb)
@@ -605,7 +627,7 @@ def _compute_levels_old(aig: AIG) -> Dict[int, int]:
         nid = i + 1
         if entry[0] == 'input':
             level[nid] = 0
-        elif entry[0] == 'and':
+        elif entry[0] in ('and', 'xor'):
             _, a, b = entry
             level[nid] = max(
                 level.get(aig.node_of(a), 0),
@@ -779,7 +801,8 @@ def _reconstruct_from_old(
             rb ^= 1
 
         n_before = new_aig.n_nodes
-        result = new_aig.make_and(ra, rb)
+        result = (new_aig.make_xor(ra, rb) if entry[0] == 'xor'
+                  else new_aig.make_and(ra, rb))
         _sync_sig_new(new_aig, sig_new, n_before, W, level_new)
         memo[oid] = result
         return result
@@ -1633,6 +1656,20 @@ def _dc_optimize_once(
                 n_sim_patterns,
             )
             _last_stats['n_care_refreshes'] += 1
+
+        if entry[0] == 'xor':
+            # XOR nodes are not rewritten by the DC pass; copy through.
+            _, old_a, old_b = entry
+            nlit = new_aig.make_xor(lit_map[old_a], lit_map[old_b])
+            new_nid = new_aig.node_of(nlit)
+            n_before_xor = new_aig.n_nodes
+            _sync_sig_new(new_aig, sig_new, n_before_xor - 1, n_sim_patterns, level_new)
+            if z3_exprs_new is not None:
+                _sync_z3_new(new_aig, z3_exprs_new, n_before_xor - 1)
+            lit_map[old_id * 2]     = nlit
+            lit_map[old_id * 2 + 1] = nlit ^ 1
+            nodes_visited += 1
+            continue
 
         _, old_a, old_b = entry
         new_a = lit_map[old_a]

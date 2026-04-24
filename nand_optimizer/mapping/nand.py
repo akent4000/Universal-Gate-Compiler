@@ -15,7 +15,7 @@ tests, circ_export — continue to work without modification.
 from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 
-from ..core.expr import Expr, Const, Lit, Not, And, Or
+from ..core.expr import Expr, Const, Lit, Not, And, Or, Xor
 from ..core.aig  import AIG, Lit as AIGLit, FALSE, TRUE
 
 
@@ -204,6 +204,15 @@ class NANDBuilder:
             # OR(a, b, …) = NAND(NOT(a), NOT(b), …)
             return self.nand(*[self.nand(self.build_expr(a)) for a in expr.args])
 
+        if isinstance(expr, Xor):
+            # XOR(a, b) — 4-NAND canonical form
+            wa = self.build_expr(expr.a)
+            wb = self.build_expr(expr.b)
+            wg1 = self.nand(wa, wb)
+            wg2 = self.nand(wa, wg1)
+            wg3 = self.nand(wb, wg1)
+            return self.nand(wg2, wg3)
+
         return ''
 
 
@@ -247,6 +256,11 @@ def expr_to_aig(expr: Expr, aig: AIG,
         for arg in expr.args[1:]:
             acc = aig.make_and(acc, aig.make_not(expr_to_aig(arg, aig, var_map)))
         return aig.make_not(acc)
+
+    if isinstance(expr, Xor):
+        a = expr_to_aig(expr.a, aig, var_map)
+        b = expr_to_aig(expr.b, aig, var_map)
+        return aig.make_xor(a, b)
 
     return FALSE
 
@@ -463,7 +477,7 @@ def _compute_needed_lits(aig: AIG, output_lits: List[AIGLit]) -> set:
         node_id = i + 1
         if (node_id * 2) in needed or (node_id * 2 + 1) in needed:
             entry = aig._nodes[i]
-            if entry[0] == 'and':
+            if entry[0] in ('and', 'xor'):
                 needed.add(entry[1])
                 needed.add(entry[2])
     return needed
@@ -615,7 +629,7 @@ def aig_to_gates(
                 a_lit, b_lit = overrides[node_id]
             else:
                 entry = aig._nodes[i]
-                if entry[0] != 'and':
+                if entry[0] not in ('and', 'xor'):
                     continue
                 _, a_lit, b_lit = entry
             needed_lits.add(a_lit)
@@ -654,7 +668,7 @@ def aig_to_gates(
                 a_lit, b_lit = overrides[node_id]
             else:
                 entry = aig._nodes[i]
-                if entry[0] != 'and':
+                if entry[0] not in ('and', 'xor'):
                     continue
                 _, a_lit, b_lit = entry
             needed_lits.add(a_lit)
@@ -712,6 +726,22 @@ def aig_to_gates(
                 w_pos = new_wire()
                 gates.append((w_pos, 'NAND', [wout, wout]))
                 lit_to_wire[pos_lit] = w_pos
+            continue
+
+        if entry[0] == 'xor':
+            # Native XOR node — 4-NAND form; positive literal = XOR output
+            _, a_lit, b_lit = entry
+            wa = lit_to_wire[a_lit]
+            wb = lit_to_wire[b_lit]
+            wg1 = new_wire(); gates.append((wg1, 'NAND', [wa, wb]))
+            wg2 = new_wire(); gates.append((wg2, 'NAND', [wa, wg1]))
+            wg3 = new_wire(); gates.append((wg3, 'NAND', [wb, wg1]))
+            wout = new_wire(); gates.append((wout, 'NAND', [wg2, wg3]))
+            lit_to_wire[pos_lit] = wout   # XOR(a,b) = positive output
+            if neg_lit in needed_lits:
+                w_neg = new_wire()
+                gates.append((w_neg, 'NAND', [wout, wout]))
+                lit_to_wire[neg_lit] = w_neg
             continue
 
         # Standard AND node — use overridden inputs if available

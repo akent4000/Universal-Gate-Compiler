@@ -125,7 +125,7 @@ def _eval_tt_over_inputs(
             vb = node_tt[aig.node_of(b)]
             if aig.is_complemented(b):
                 vb = (~vb) & mask
-            node_tt[nid] = va & vb
+            node_tt[nid] = va ^ vb if entry[0] == 'xor' else va & vb
 
     out_val = node_tt[aig.node_of(out_lit)]
     if aig.is_complemented(out_lit):
@@ -306,13 +306,16 @@ def bdd_decompose_aig(
         lit_map[old_lit]       = nlit
         lit_map[old_lit ^ 1]   = nlit ^ 1
 
-    # Copy all AND nodes in topological order (base translation into new_aig).
+    # Copy all gate nodes in topological order (base translation into new_aig).
     for i, entry in enumerate(old_aig._nodes):
         old_id = i + 1
         if entry[0] == 'input':
             continue
         _, a, b = entry
-        nlit = new_aig.make_and(lit_map[a], lit_map[b])
+        if entry[0] == 'xor':
+            nlit = new_aig.make_xor(lit_map[a], lit_map[b])
+        else:
+            nlit = new_aig.make_and(lit_map[a], lit_map[b])
         lit_map[old_id * 2]     = nlit
         lit_map[old_id * 2 + 1] = nlit ^ 1
 

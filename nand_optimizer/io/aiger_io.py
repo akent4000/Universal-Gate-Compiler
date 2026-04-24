@@ -28,6 +28,43 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from ..core.aig import AIG, Lit
 
 
+# ── XOR expansion helper ─────────────────────────────────────────────────────
+
+def _expand_xor_nodes(aig: AIG, out_lits: List[Lit]) -> Tuple[AIG, List[Lit]]:
+    """
+    Return a pure-AND AIG equivalent to ``aig`` by expanding each native XOR
+    node into 3 AND nodes: XOR(a,b) = OR(AND(a,~b), AND(~a,b)) = ~AND(~AND(a,~b), ~AND(~a,b)).
+
+    Called by ``write_aiger`` because AIGER format supports AND gates only.
+    If the AIG has no XOR nodes, returns the original AIG unchanged.
+    """
+    has_xor = any(e[0] == 'xor' for e in aig._nodes)
+    if not has_xor:
+        return aig, list(out_lits)
+
+    new_aig = AIG()
+    lit_map: Dict[int, int] = {0: 0, 1: 1}
+    for i, entry in enumerate(aig._nodes):
+        nid = i + 1
+        if entry[0] == 'input':
+            nlit = new_aig.make_input(entry[1])
+        elif entry[0] == 'xor':
+            _, a, b = entry
+            # XOR(a,b) expanded to 3 ANDs: OR(AND(a,~b), AND(~a,b))
+            na, nb = lit_map[a], lit_map[b]
+            nlit = new_aig.make_or(
+                new_aig.make_and(na, new_aig.make_not(nb)),
+                new_aig.make_and(new_aig.make_not(na), nb),
+            )
+        else:
+            _, a, b = entry
+            nlit = new_aig.make_and(lit_map[a], lit_map[b])
+        lit_map[nid * 2]     = nlit
+        lit_map[nid * 2 + 1] = nlit ^ 1
+    new_outs = [lit_map.get(l, l) for l in out_lits]
+    return new_aig.gc(new_outs)
+
+
 # ── collection / mapping helpers ─────────────────────────────────────────────
 
 def _collect(aig: AIG) -> Tuple[List[int], List[Tuple[int, int, int]]]:
@@ -117,6 +154,9 @@ def write_aiger(
         binary:       write `aig` delta-compressed format (default) or `aag` ASCII.
         comment:      optional trailing UTF-8 comment section.
     """
+    # AIGER supports AND gates only; expand any native XOR nodes first.
+    aig, out_lits = _expand_xor_nodes(aig, list(out_lits))
+
     inputs, ands = _collect(aig)
     I = len(inputs)
     A = len(ands)

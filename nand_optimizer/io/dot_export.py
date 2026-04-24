@@ -56,7 +56,7 @@ def aig_to_dot(
     const_used = any(
         AIG.node_of(a) == 0 or AIG.node_of(b) == 0
         for entry in aig._nodes
-        if entry[0] == "and"
+        if entry[0] in ("and", "xor")
         for _, a, b in [entry]
     )
     if output_lits:
@@ -85,19 +85,24 @@ def aig_to_dot(
         )
         lines.append("")
 
-    # AND nodes
+    # AND and XOR nodes
     for i, entry in enumerate(aig._nodes):
+        nid = i + 1
         if entry[0] == "and":
-            nid = i + 1
             lines.append(
                 f'  n{nid} [label="& [{nid}]", shape=ellipse, '
                 f'style=filled, fillcolor="#F9E79F"];'
             )
+        elif entry[0] == "xor":
+            lines.append(
+                f'  n{nid} [label="⊕ [{nid}]", shape=diamond, '
+                f'style=filled, fillcolor="#FAD7A0"];'
+            )
 
     lines.append("")
-    lines.append("  // AND gate edges  (red dashed = complemented input)")
+    lines.append("  // Gate edges  (red dashed = complemented input)")
     for i, entry in enumerate(aig._nodes):
-        if entry[0] == "and":
+        if entry[0] in ("and", "xor"):
             _, a, b = entry
             nid = i + 1
             for child_lit in (a, b):

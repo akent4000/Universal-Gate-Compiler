@@ -32,11 +32,19 @@ StateTable / KISS2 FSM ─────────────┤ (excitation lo
     │        ├─ Window resubstitution   — 0-gate / 1-gate drop-in replacement
     │        └─ DC-masked exact synth   — SAT with `~care` as don't-care
     ├─[8] AIG Balancing                 — minimise critical-path depth (area-preserving)
-    ├─[9] NAND Mapping + XOR extraction — XOR/XNOR patterns → 4-NAND
+    ├─[9] NAND Mapping + XOR extraction — native XOR nodes + legacy 3-AND pattern → 4-NAND
     └─ FSM wrap (Phase 3)               — D-FF / JK-FF, clock, async reset
 ```
 
 All outputs share a **single** gate network — cross-output sub-expression reuse is automatic.
+
+The internal graph is a **XAG (XOR-And-Inverter Graph)**: XOR is a first-class
+node alongside AND (both with complemented edges), not a late-stage 3-AND
+pattern.  Every synthesis pass (rewrite, FRAIG, balance, don't-care) is
+XOR-aware; the gate mapper emits native XOR nodes directly to the canonical
+4-NAND form.  Rewriting has an optional `XAG_DB_4` template database (87% of
+the 65 536 4-input functions are cheaper in XAG than in pure AIG) — opt in
+via `rewrite_aig(..., use_xag=True)`.
 
 Steps 7–8 can be replaced by a user-supplied **synthesis script** (see below).
 Default script is `"rewrite; fraig; rewrite; balance"`. `dc` is not in the

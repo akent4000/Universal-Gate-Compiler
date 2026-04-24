@@ -44,11 +44,27 @@ else:
             check=True, env=_env,
         )
         del _subprocess, _sys, _env
-    del _os, _precompute_4cut
+    del _precompute_4cut
+
+    # ── Bootstrap XAG_DB (AND+XOR template DB) ───────────────────────────────
+    from . import precompute_xag_db as _precompute_xag_db
+    if not _os.path.exists(_precompute_xag_db.DB_PATH):
+        import subprocess as _subprocess
+        import sys as _sys
+        print("[nand_optimizer] xag_db_4.pkl not found - generating XAG template DB "
+              "(one-time, parallel)...", flush=True)
+        _env = dict(_os.environ)
+        _env['_NAND_OPTIMIZER_BOOTSTRAPPING'] = '1'
+        _subprocess.run(
+            [_sys.executable, '-m', 'nand_optimizer.precompute_xag_db'],
+            check=True, env=_env,
+        )
+        del _subprocess, _sys, _env
+    del _os, _precompute_xag_db
 
     from .core.truth_table       import TruthTable
     from .pipeline                import optimize, OutputResult
-    from .core.expr               import Expr, Const, Lit, Not, And, Or, ONE, ZERO, simp
+    from .core.expr               import Expr, Const, Lit, Not, And, Or, Xor, ONE, ZERO, simp
     from .core.implicant          import (Implicant, quine_mccluskey, espresso,
                                           multi_output_espresso)
     from .synthesis.optimize      import (phase_assign, factorize, brayton_factor,
@@ -95,7 +111,7 @@ else:
         # core pipeline
         'TruthTable', 'optimize', 'OutputResult',
         # expression AST
-        'Expr', 'Const', 'Lit', 'Not', 'And', 'Or', 'ONE', 'ZERO', 'simp',
+        'Expr', 'Const', 'Lit', 'Not', 'And', 'Or', 'Xor', 'ONE', 'ZERO', 'simp',
         # logic minimisation
         'Implicant', 'quine_mccluskey', 'espresso', 'multi_output_espresso',
         # optimisation passes

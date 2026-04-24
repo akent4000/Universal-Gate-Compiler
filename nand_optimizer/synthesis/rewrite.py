@@ -20,6 +20,14 @@ from typing import Dict, List, Optional, Set, Tuple
 from ..core.aig import AIG, Lit as AIGLit, TRUE, FALSE
 from ..aig_db_4 import AIG_DB_4
 
+def _xag_db() -> dict:
+    """Lazy import of XAG_DB_4 — returns empty dict if pkl missing."""
+    try:
+        from ..xag_db_4 import XAG_DB_4
+        return XAG_DB_4
+    except Exception:
+        return {}
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Cut enumeration  (generalised over k ≤ 6)
@@ -39,7 +47,7 @@ def enumerate_cuts(aig: AIG, k: int = 4) -> List[List[Set[int]]]:
         node_id = i + 1
         cuts[node_id].append({node_id})     # trivial cut
 
-        if entry[0] == 'and':
+        if entry[0] in ('and', 'xor'):
             _, lit_a, lit_b = entry
             id_a = aig.node_of(lit_a)
             id_b = aig.node_of(lit_b)
@@ -82,7 +90,7 @@ def evaluate_cut_tt(aig: AIG, node_id: int, cut: Set[int]) -> Tuple[int, List[in
         if curr_id in tt_val:
             continue
         entry = aig._nodes[i]
-        if entry[0] != 'and':
+        if entry[0] not in ('and', 'xor'):
             continue
 
         _, lit_a, lit_b = entry
@@ -98,7 +106,10 @@ def evaluate_cut_tt(aig: AIG, node_id: int, cut: Set[int]) -> Tuple[int, List[in
         if aig.is_complemented(lit_b):
             val_b = (~val_b) & mask
 
-        tt_val[curr_id] = val_a & val_b
+        if entry[0] == 'xor':
+            tt_val[curr_id] = val_a ^ val_b
+        else:
+            tt_val[curr_id] = val_a & val_b
 
     return tt_val.get(node_id, 0) & mask, ordered_cut
 
@@ -115,7 +126,7 @@ def _compute_ref_counts(aig: AIG, out_lits: List[int]) -> Dict[int, int]:
     """
     ref: Dict[int, int] = {i + 1: 0 for i in range(aig.n_nodes)}
     for entry in aig._nodes:
-        if entry[0] == 'and':
+        if entry[0] in ('and', 'xor'):
             _, a_lit, b_lit = entry
             ida = aig.node_of(a_lit)
             idb = aig.node_of(b_lit)
@@ -155,7 +166,7 @@ def _compute_mffc(
         if entry[0] == 'input':
             return
         mffc.add(n)
-        _, a_lit, b_lit = entry
+        _, a_lit, b_lit = entry  # works for both 'and' and 'xor'
         for child_lit in (a_lit, b_lit):
             ch = aig.node_of(child_lit)
             if ch == 0 or ch in cut:
@@ -214,33 +225,67 @@ def _count_template_new_nodes(
         virtual_counter += 2
         return v
 
-    for op_idx, (ta, tb) in enumerate(ops):
+    for op_idx, op_entry in enumerate(ops):
+        if len(op_entry) == 3:
+            ta, tb, op_kind = op_entry
+        else:
+            ta, tb = op_entry
+            op_kind = 0   # AND (backward compat with AIG_DB_4)
         if ta not in sim or tb not in sim:
             return (None, None)
         m_a = sim[ta]
         m_b = sim[tb]
-        if m_a > m_b:
-            m_a, m_b = m_b, m_a
 
-        # Constant propagation — replicates AIG.make_and's fast-path.
-        if m_a == FALSE:
-            result = FALSE
-        elif m_a == TRUE:
-            result = m_b
-        elif m_a == m_b:
-            result = m_a
-        elif m_a == (m_b ^ 1):
-            result = FALSE
-        else:
-            existing = new_aig.get_and(m_a, m_b)
-            if existing is not None:
-                result = existing
-            elif (m_a, m_b) in virtual_map:
-                result = virtual_map[(m_a, m_b)]
+        if op_kind == 1:   # XOR
+            # Constant propagation for XOR
+            if m_a == FALSE:
+                result = m_b
+            elif m_b == FALSE:
+                result = m_a
+            elif m_a == TRUE:
+                result = m_b ^ 1
+            elif m_b == TRUE:
+                result = m_a ^ 1
+            elif m_a == m_b:
+                result = FALSE
+            elif m_a == (m_b ^ 1):
+                result = TRUE
             else:
-                result = fresh_virtual()
-                virtual_map[(m_a, m_b)] = result
-                n_new += 1
+                if m_a > m_b:
+                    m_a, m_b = m_b, m_a
+                vkey = (1, m_a, m_b)
+                existing = new_aig.get_xor(m_a, m_b)
+                if existing is not None:
+                    result = existing
+                elif vkey in virtual_map:
+                    result = virtual_map[vkey]
+                else:
+                    result = fresh_virtual()
+                    virtual_map[vkey] = result
+                    n_new += 1
+        else:              # AND
+            if m_a > m_b:
+                m_a, m_b = m_b, m_a
+            # Constant propagation — replicates AIG.make_and's fast-path.
+            if m_a == FALSE:
+                result = FALSE
+            elif m_a == TRUE:
+                result = m_b
+            elif m_a == m_b:
+                result = m_a
+            elif m_a == (m_b ^ 1):
+                result = FALSE
+            else:
+                vkey = (0, m_a, m_b)
+                existing = new_aig.get_and(m_a, m_b)
+                if existing is not None:
+                    result = existing
+                elif vkey in virtual_map:
+                    result = virtual_map[vkey]
+                else:
+                    result = fresh_virtual()
+                    virtual_map[vkey] = result
+                    n_new += 1
 
         sim[op_base + 2 * op_idx]     = result
         sim[op_base + 2 * op_idx + 1] = result ^ 1
@@ -266,10 +311,18 @@ def _apply_template(
         sim[3 + 2 * j]     = base ^ 1
 
     op_base = 2 + 2 * cut_size
-    for op_idx, (ta, tb) in enumerate(ops):
+    for op_idx, op_entry in enumerate(ops):
+        if len(op_entry) == 3:
+            ta, tb, op_kind = op_entry
+        else:
+            ta, tb = op_entry
+            op_kind = 0   # AND
         m_a = sim[ta]
         m_b = sim[tb]
-        created = new_aig.make_and(m_a, m_b)
+        if op_kind == 1:
+            created = new_aig.make_xor(m_a, m_b)
+        else:
+            created = new_aig.make_and(m_a, m_b)
         sim[op_base + 2 * op_idx]     = created
         sim[op_base + 2 * op_idx + 1] = created ^ 1
 
@@ -288,6 +341,7 @@ def rewrite_aig(
     use_exact:        bool                 = False,
     exact_max_gates:  int                  = 6,
     exact_timeout_ms: int                  = 2000,
+    use_xag:          bool                 = False,
 ) -> Tuple[AIG, List[int]]:
     """
     Fanout-aware rewriting pass.
@@ -312,6 +366,7 @@ def rewrite_aig(
     if out_lits is None:
         out_lits = []
 
+    xag_db = _xag_db() if use_xag else {}
     current_aig = old_aig
     current_out = list(out_lits)
 
@@ -326,6 +381,14 @@ def rewrite_aig(
             old_id = i + 1
             if entry[0] == 'input':
                 nlit = new_aig.make_input(entry[1])
+                lit_map[old_id * 2]     = nlit
+                lit_map[old_id * 2 + 1] = nlit ^ 1
+                continue
+
+            if entry[0] == 'xor':
+                # XOR nodes are not yet rewritten against templates; copy through.
+                _, old_a, old_b = entry
+                nlit = new_aig.make_xor(lit_map[old_a], lit_map[old_b])
                 lit_map[old_id * 2]     = nlit
                 lit_map[old_id * 2 + 1] = nlit ^ 1
                 continue
@@ -357,7 +420,16 @@ def rewrite_aig(
                 template = None
                 if k <= 4 and tt in AIG_DB_4:
                     template = AIG_DB_4[tt]
-                elif use_exact:
+                # Try XAG template; prefer it if it yields fewer new nodes.
+                if k <= 4 and tt in xag_db:
+                    xag_tmpl = xag_db[tt]
+                    if template is None:
+                        template = xag_tmpl
+                    else:
+                        # Quick cost compare: prefer whichever has fewer ops.
+                        if len(xag_tmpl[1]) < len(template[1]):
+                            template = xag_tmpl
+                if template is None and use_exact:
                     try:
                         from .exact_synthesis import exact_synthesize
                         template = exact_synthesize(

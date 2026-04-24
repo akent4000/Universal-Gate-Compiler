@@ -214,3 +214,4 @@ nand_optimizer/aig_db_4.pkl
 *.circ
 CLAUDE.md
 .claude/
+nand_optimizer/xag_db_4.pkl

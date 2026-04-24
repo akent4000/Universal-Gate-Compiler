@@ -43,7 +43,7 @@ def _compute_levels(aig: AIG) -> Dict[int, int]:
         node_id = i + 1
         if entry[0] == 'input':
             levels[node_id] = 0
-        else:
+        else:  # 'and' or 'xor' — both cost 1 level
             _, lit_a, lit_b = entry
             lev_a = levels.get(aig.node_of(lit_a), 0)
             lev_b = levels.get(aig.node_of(lit_b), 0)
@@ -187,7 +187,20 @@ def balance_aig(
             lit_levels[nlit ^ 1]       = 0
             continue
 
-        # Collect AND-tree leaves (possibly spanning multiple old AIG levels).
+        if entry[0] == 'xor':
+            # XOR nodes are not AND-trees; copy through and track depth.
+            _, old_a, old_b = entry
+            new_a = lit_map[old_a]
+            new_b = lit_map[old_b]
+            result_lit = new_aig.make_xor(new_a, new_b)
+            lev = max(lit_levels.get(new_a, 0), lit_levels.get(new_b, 0)) + 1
+            lit_levels[result_lit]       = lev
+            lit_levels[result_lit ^ 1]   = lev
+            lit_map[old_id * 2]     = result_lit
+            lit_map[old_id * 2 + 1] = result_lit ^ 1
+            continue
+
+        # AND node: collect leaves and build balanced tree.
         leaves = _collect_and_leaves(old_id, old_aig, ref, lit_map)
 
         # Build minimum-depth AND tree in new_aig.

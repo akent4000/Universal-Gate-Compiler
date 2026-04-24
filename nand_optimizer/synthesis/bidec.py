@@ -452,6 +452,13 @@ def bidec_aig(
                 lit_map[old_id * 2 + 1] = nlit ^ 1
                 continue
 
+            if entry[0] == 'xor':
+                _, old_a, old_b = entry
+                nlit = new_aig.make_xor(lit_map[old_a], lit_map[old_b])
+                lit_map[old_id * 2]     = nlit
+                lit_map[old_id * 2 + 1] = nlit ^ 1
+                continue
+
             _, old_a, old_b = entry
             new_a = lit_map[old_a]
             new_b = lit_map[old_b]

@@ -38,7 +38,7 @@ def _simulate(aig: AIG, patterns: Dict[str, int], W: int) -> Dict[int, int]:
             b = sim[aig.node_of(lb)]
             if aig.is_complemented(lb):
                 b = (~b) & MASK
-            sim[nid] = a & b
+            sim[nid] = (a ^ b) if entry[0] == 'xor' else (a & b)
     return sim
 
 
@@ -109,7 +109,7 @@ def _build_z3_exprs(aig: AIG):
             eb = exprs[aig.node_of(lb)]
             if aig.is_complemented(lb):
                 eb = z3.Not(eb)
-            exprs[nid] = z3.And(ea, eb)
+            exprs[nid] = z3.Xor(ea, eb) if entry[0] == 'xor' else z3.And(ea, eb)
 
     return vars_, exprs
 
@@ -187,6 +187,9 @@ def _apply_subst(
 
         if entry[0] == 'input':
             nlit = new_aig.make_input(entry[1])
+        elif entry[0] == 'xor':
+            _, la, lb = entry
+            nlit = new_aig.make_xor(lit_map[la], lit_map[lb])
         else:
             _, la, lb = entry
             nlit = new_aig.make_and(lit_map[la], lit_map[lb])
