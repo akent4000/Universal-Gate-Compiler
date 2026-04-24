@@ -69,49 +69,103 @@ class Implicant:
     A product term / prime implicant as a ternary cube.
 
     bits[i] in {0, 1, DASH}  where DASH = -1 means "don't care at position i".
+
+    Internal representation is two int bit-masks (`_care`, `_value`) of width
+    `_n` — bit position `(n - 1 - i)` holds the value at `bits[i]`. DASH bits
+    are 0 in `_care`; `_value` is always masked by `_care` so XOR/AND on the
+    masks produces correct ternary semantics with a single `int.bit_count()`
+    popcount. The `bits` tuple is retained for external consumers (see
+    mapping/nand.py, hashing into `Dict[Tuple, Implicant]`, etc.).
     """
     DASH = DASH
 
-    __slots__ = ('bits',)
+    __slots__ = ('bits', '_care', '_value', '_n')
 
     def __init__(self, bits: Tuple[int, ...]):
         self.bits = bits
+        n = len(bits)
+        care = 0
+        value = 0
+        for i, b in enumerate(bits):
+            if b == DASH:
+                continue
+            pos = n - 1 - i
+            care |= 1 << pos
+            if b == 1:
+                value |= 1 << pos
+        self._n     = n
+        self._care  = care
+        self._value = value
+
+    @classmethod
+    def _from_masks(cls, care: int, value: int, n: int) -> Implicant:
+        """Build an Implicant directly from bit-masks (skips per-position loop).
+
+        Reconstructs `bits` as MSB-first ternary tuple so external consumers
+        of `self.bits` keep working.
+        """
+        bits = tuple(
+            ((value >> (n - 1 - i)) & 1) if (care >> (n - 1 - i)) & 1 else DASH
+            for i in range(n)
+        )
+        self = cls.__new__(cls)
+        self.bits   = bits
+        self._n     = n
+        self._care  = care
+        self._value = value
+        return self
 
     # ── properties ────────────────────────────────────────────────────────────
 
     def literal_count(self) -> int:
-        return sum(1 for b in self.bits if b != DASH)
+        return self._care.bit_count()
 
     def subsumes(self, cube: Tuple[int, ...]) -> bool:
         """True iff every minterm in *cube* is also covered by self.
 
         Cube-subsumption: self covers cube iff for every position i,
         self.bits[i] == DASH  or  self.bits[i] == cube[i].
+
+        Accepts either a ternary cube tuple or precomputed (care, value) masks
+        via `subsumes_masks`.
         """
-        return all(pb == DASH or pb == cb for pb, cb in zip(self.bits, cube))
+        n = self._n
+        cube_care  = 0
+        cube_value = 0
+        for i, b in enumerate(cube):
+            if b == DASH:
+                continue
+            pos = n - 1 - i
+            cube_care |= 1 << pos
+            if b == 1:
+                cube_value |= 1 << pos
+        return (self._care & ~cube_care) == 0 \
+           and ((self._value ^ cube_value) & self._care) == 0
+
+    def subsumes_masks(self, cube_care: int, cube_value: int) -> bool:
+        """Fast path for `subsumes` when the cube's masks are precomputed."""
+        return (self._care & ~cube_care) == 0 \
+           and ((self._value ^ cube_value) & self._care) == 0
 
     def covers_minterm(self, m: int) -> bool:
-        mb = int_to_bits(m, len(self.bits))
-        return all(ib == DASH or ib == mb[i] for i, ib in enumerate(self.bits))
+        # minterm m is a plain integer — every bit is a "care" bit.
+        return ((self._value ^ m) & self._care) == 0
 
     # ── combination ───────────────────────────────────────────────────────────
 
     def can_combine(self, other: Implicant) -> bool:
         """Combine if DASH positions match and exactly one non-DASH bit differs."""
-        diffs = 0
-        for a, b in zip(self.bits, other.bits):
-            if (a == DASH) != (b == DASH):
-                return False
-            if a != b:
-                diffs += 1
-                if diffs > 1:
-                    return False
-        return diffs == 1
+        if self._care != other._care:
+            return False
+        return (self._value ^ other._value).bit_count() == 1
 
     def combine(self, other: Implicant) -> Implicant:
-        return Implicant(
-            tuple(DASH if a != b else a for a, b in zip(self.bits, other.bits))
-        )
+        # Precondition: self.can_combine(other) — callers enforce this.
+        # The differing bit becomes DASH; all others are preserved.
+        diff = self._value ^ other._value
+        new_care  = self._care & ~diff
+        new_value = self._value & new_care
+        return Implicant._from_masks(new_care, new_value, self._n)
 
     # ── display ───────────────────────────────────────────────────────────────
 
@@ -157,16 +211,14 @@ def quine_mccluskey(
     if not all_cubes:
         return []
 
-    def ones_count(bits: Tuple[int, ...]) -> int:
-        return sum(1 for b in bits if b == 1)
-
     current = dict(all_cubes)
     primes: Dict[Tuple[int, ...], Implicant] = {}
 
     while current:
         groups: Dict[int, List[Implicant]] = defaultdict(list)
         for imp in current.values():
-            groups[ones_count(imp.bits)].append(imp)
+            # _value is care-masked, so bit_count == explicit "1"-bits.
+            groups[imp._value.bit_count()].append(imp)
 
         used: Set[Tuple[int, ...]] = set()
         next_level: Dict[Tuple[int, ...], Implicant] = {}
@@ -195,6 +247,21 @@ def quine_mccluskey(
 #  Cover selection  (essential PIs + greedy)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _cube_masks(cube: Tuple[int, ...]) -> Tuple[int, int]:
+    """Ternary cube → (care, value) int bit-masks (MSB = bit `n-1`)."""
+    n = len(cube)
+    care = 0
+    value = 0
+    for i, b in enumerate(cube):
+        if b == DASH:
+            continue
+        pos = n - 1 - i
+        care |= 1 << pos
+        if b == 1:
+            value |= 1 << pos
+    return care, value
+
+
 def select_cover(
     primes:   List[Implicant],
     on_cubes: List[Tuple[int, ...]],
@@ -210,8 +277,15 @@ def select_cover(
     if not on_cubes:
         return []
 
+    # Precompute (care, value) for every on_cube — `subsumes` is called
+    # O(|primes| * |on_cubes|) times in the coverage matrix plus another
+    # O(|primes| * |uncov|) per greedy pick; recomputing tuple→mask every
+    # call would dominate the function.
+    cube_masks: List[Tuple[int, int]] = [_cube_masks(c) for c in on_cubes]
+
     coverage: List[List[int]] = [
-        [j for j, p in enumerate(primes) if p.subsumes(on_cubes[i])]
+        [j for j, p in enumerate(primes)
+           if p.subsumes_masks(cube_masks[i][0], cube_masks[i][1])]
         for i in range(len(on_cubes))
     ]
 
@@ -229,8 +303,10 @@ def select_cover(
                 j = avail[0]
                 selected.append(primes[j])
                 sel_set.add(j)
+                pj = primes[j]
                 for k in list(uncov):
-                    if primes[j].subsumes(on_cubes[k]):
+                    cc, cv = cube_masks[k]
+                    if pj.subsumes_masks(cc, cv):
                         uncov.discard(k)
                 changed = True
 
@@ -239,7 +315,9 @@ def select_cover(
         best = max(
             (j for j in range(len(primes)) if j not in sel_set),
             key=lambda j: (
-                sum(1 for k in uncov if primes[j].subsumes(on_cubes[k])),
+                sum(1 for k in uncov
+                      if primes[j].subsumes_masks(cube_masks[k][0],
+                                                  cube_masks[k][1])),
                 -primes[j].literal_count(),
             ),
             default=None,
@@ -248,8 +326,10 @@ def select_cover(
             break
         selected.append(primes[best])
         sel_set.add(best)
+        pb = primes[best]
         for k in list(uncov):
-            if primes[best].subsumes(on_cubes[k]):
+            cc, cv = cube_masks[k]
+            if pb.subsumes_masks(cc, cv):
                 uncov.discard(k)
 
     return selected
@@ -278,8 +358,11 @@ def _select_cover_shared(
     if not on_cubes:
         return []
 
+    cube_masks: List[Tuple[int, int]] = [_cube_masks(c) for c in on_cubes]
+
     coverage: List[List[int]] = [
-        [j for j, p in enumerate(primes) if p.subsumes(on_cubes[i])]
+        [j for j, p in enumerate(primes)
+           if p.subsumes_masks(cube_masks[i][0], cube_masks[i][1])]
         for i in range(len(on_cubes))
     ]
 
@@ -296,8 +379,10 @@ def _select_cover_shared(
                 j = avail[0]
                 selected.append(primes[j])
                 sel_set.add(j)
+                pj = primes[j]
                 for k in list(uncov):
-                    if primes[j].subsumes(on_cubes[k]):
+                    cc, cv = cube_masks[k]
+                    if pj.subsumes_masks(cc, cv):
                         uncov.discard(k)
                 changed = True
 
@@ -305,7 +390,9 @@ def _select_cover_shared(
         best = max(
             (j for j in range(len(primes)) if j not in sel_set),
             key=lambda j: (
-                sum(1 for k in uncov if primes[j].subsumes(on_cubes[k])),
+                sum(1 for k in uncov
+                      if primes[j].subsumes_masks(cube_masks[k][0],
+                                                  cube_masks[k][1])),
                 1 if bits_freq.get(primes[j].bits, 1) > 1 else 0,
                 -primes[j].literal_count(),
             ),
@@ -315,8 +402,10 @@ def _select_cover_shared(
             break
         selected.append(primes[best])
         sel_set.add(best)
+        pb = primes[best]
         for k in list(uncov):
-            if primes[best].subsumes(on_cubes[k]):
+            cc, cv = cube_masks[k]
+            if pb.subsumes_masks(cc, cv):
                 uncov.discard(k)
 
     return selected
