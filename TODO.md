@@ -102,7 +102,7 @@
 ## Фаза 6: Реструктуризация проекта (Package Layout)
 *Разбиение плоского пакета на подпакеты по логическим слоям.*
 
-Завершено: плоский пакет из 37 модулей разложен по 8 подпакетам (`core/`, `synthesis/`, `mapping/`, `io/`, `sequential/`, `datapath/`, `analysis/`, `testing/`); оркестраторы (`pipeline.py`, `script.py`, `verify.py`, `__init__.py`, `__main__.py`) плюс bootstrap-пара `aig_db_4.py`/`precompute_4cut.py` остались на верхнем уровне. Все `from nand_optimizer import ...` работают без изменений через re-export в `__init__.py`; env-guard subprocess-bootstrap `_NAND_OPTIMIZER_BOOTSTRAPPING` проверен на чистом перезапуске без `aig_db_4.py`. См. [TODO_done.md](TODO_done.md#фаза-6-реструктуризация-проекта-package-layout).
+Завершено: плоский пакет из 37 модулей разложен по 8 подпакетам (`core/`, `synthesis/`, `mapping/`, `io/`, `sequential/`, `datapath/`, `analysis/`, `testing/`); оркестраторы (`pipeline.py`, `script.py`, `verify.py`, `__init__.py`, `__main__.py`) остались на верхнем уровне; монолитный `mapping/circ_export.py` разбит на подпакет `mapping/circ_export/` (5 модулей: `_layout`, `_decoder_builder`, `_decoder`, `_fsm`, `_counter`) — добавлена новая функция `export_counter_circ`; `aig_db_4.py` (65k строк Python) мигрирован в бинарный pickle `aig_db_4.pkl` (~2 МБ), `aig_db_4.py` превращён в тонкий lazy-loader (~35 строк, ROADMAP P1#4 ✅). Все `from nand_optimizer import ...` работают без изменений через re-export в `__init__.py`. См. [TODO_done.md](TODO_done.md#фаза-6-реструктуризация-проекта-package-layout).
 
 ---
 

@@ -210,7 +210,7 @@ project_dump.md
 project_dumper.py
 
 # Auto-generated NPN template DB (built on first import via precompute_4cut.py)
-nand_optimizer/aig_db_4.py
+nand_optimizer/aig_db_4.pkl
 *.circ
 CLAUDE.md
 .claude/

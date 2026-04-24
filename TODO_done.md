@@ -115,7 +115,7 @@
 
 ---
 
-## Фаза 2.7 (续)
+## Фаза 2.7 (Продолжение)
 
 * [x] **care_rounds_internal как флаг `dc -C N`:** Реализовано в [nand_optimizer/script.py](nand_optimizer/script.py) (коммит `f232c33`). Добавлен парсер флага `-C N` в команду `dc`, который маппируется в параметр `rounds` функции `dc_optimize()`. Использование: `dc -C 2` для 2 раундов итеративной care-propagation, либо комбинированно `dc -C 3 --odc -K 5`. Поддержка multiple rounds в V2 позволяет tight-fix reconvergent-path care-множества для EPFL бенчмарков со сложной fanout-структурой.
 
@@ -146,7 +146,7 @@
 
 ---
 
-## Фаза 5 (续)
+## Фаза 5 (Продолжение)
 
 * [x] **Verilog Front-end (структурный + поведенческий синтаксис):** Новый модуль [nand_optimizer/verilog_io.py](nand_optimizer/verilog_io.py). Нативный парсер без внешних зависимостей (Python standard library только): tokenizer на основе regex + recursive-descent parser + вычислитель выражений с полным приоритетом операторов IEEE 1364. Поддержка:
   - Структурные гейты: `and`, `or`, `nand`, `nor`, `not`, `xor`, `xnor`, `buf`
@@ -159,7 +159,7 @@
 
 ---
 
-## Фаза 4 (续)
+## Фаза 4 (Продолжение)
 
 * [x] **Static Timing Analysis (STA):** Новый модуль [nand_optimizer/sta.py](nand_optimizer/sta.py). Вычисление логической задержки от входов до выходов на базе простой gate-delay модели (AND/NAND/OR/NOR/NOT = 1 unit, constant-inputs = 0). Функции:
   - `compute_arrival_times(aig, output_lits)` → `Dict[node_id, int]` — максимальная задержка от primary inputs
@@ -175,14 +175,14 @@
 * [x] **Разбиение плоского пакета на подпакеты по слоям:** Плоский `nand_optimizer/` (37 Python-модулей) разложен по 8 подпакетам одним механическим коммитом через `git mv`, так что история каждого файла сохранена как rename. Итоговая раскладка:
   - `nand_optimizer/core/` — `aig.py`, `expr.py`, `truth_table.py`, `implicant.py`
   - `nand_optimizer/synthesis/` — `rewrite.py`, `fraig.py`, `balance.py`, `decomposition.py`, `dont_care.py`, `exact_synthesis.py`, `optimize.py`, `bidec.py`, `bdd_decomp.py`, `sat_resub.py`
-  - `nand_optimizer/mapping/` — `nand.py`, `circ_export.py`
+  - `nand_optimizer/mapping/` — `nand.py`, `circ_export/` (пакет из 5 модулей)
   - `nand_optimizer/io/` — `aiger_io.py`, `blif_io.py`, `verilog_io.py`, `dot_export.py`
   - `nand_optimizer/sequential/` — `fsm.py`
   - `nand_optimizer/datapath/` — `structural.py`, `datapath.py`
   - `nand_optimizer/analysis/` — `sta.py`, `switching.py`, `atpg.py`
   - `nand_optimizer/testing/` — `tests.py`, `property_tests.py`, `benchmark_runner.py`, `epfl_bench.py`, `profile.py`
   - Оркестраторы на верхнем уровне: `pipeline.py`, `script.py`, `verify.py`, `__init__.py`, `__main__.py`, плюс CLI-хелпер `auto_compose.py`
-  - Bootstrap-пара: `aig_db_4.py` (generated, gitignored) + `precompute_4cut.py` — оставлены на верхнем уровне, т.к. subprocess-бутстрап спавнит `python -m nand_optimizer.precompute_4cut` и рассчитывает на неизменный import-path.
+  - Bootstrap-пара: `aig_db_4.py` (lazy-loader, ~35 строк) + `precompute_4cut.py` — оставлены на верхнем уровне; генерируемый блоб `aig_db_4.pkl` (~2 МБ, gitignored) позже мигрирован из Python-текста в binary pickle (см. ниже).
 
   **Импорты:** каждый subpackage↔subpackage импорт переписан через `..other.mod`, внутрисубпакетные — через `.mod`, top-level→subpackage — через `.subpkg.mod`. Все 95 символов из `nand_optimizer.__all__` по-прежнему re-exported в [`__init__.py`](nand_optimizer/__init__.py), так что `from nand_optimizer import X` для публичного API работает без изменений. Внешние тесты [tests/test_dc_odc_soundness.py](tests/test_dc_odc_soundness.py) обновлены на новые пути (`nand_optimizer.io.aiger_io`, `nand_optimizer.synthesis.dont_care`, `nand_optimizer.synthesis.fraig`).
 
@@ -190,9 +190,22 @@
 
   **Регрессия:** `python -m nand_optimizer all` — 411/411 T-тестов прошли на 7seg (62), adder (33), excess3 (41), rd53 (33), parity9 (19), mult3 (54), mult4 (68), misex1 (61), z4ml (40). `pytest tests/` — 6/6 passed. `proptest --cases 20` — 20/20 OK. Полный скрипт `balance; rewrite; fraig; dc; bidec; resub; balance` отрабатывает без регрессий. [CLAUDE.md](CLAUDE.md) обновлён: добавлен раздел «Package Layout» с деревом, таблица модулей и pipeline-диаграмма теперь ссылаются на новые пути (`core/aig.py`, `synthesis/rewrite.py` и т.д.).
 
+* [x] **`aig_db_4.pkl` — миграция NPN-БД из Python-текста в binary pickle (ROADMAP P1#4):** `precompute_4cut.py` теперь сериализует результат в `aig_db_4.pkl` через `pickle.dump` (~2 МБ vs. 5.5 МБ Python-текста); `DB_PATH` изменён с `.py` на `.pkl`. `aig_db_4.py` превращён в тонкий (~35 строк) lazy-loader: модуль-уровневый `__getattr__` вызывает `pickle.load` при первом обращении к `AIG_DB_4` и кеширует результат. Все существующие `from ..aig_db_4 import AIG_DB_4` в `rewrite.py`, `dont_care.py`, `bidec.py`, `sat_resub.py` работают без изменений. `.gitignore` обновлён с `aig_db_4.py` на `aig_db_4.pkl`; bootstrap в `__init__.py` пересобирает pickle через `python -m nand_optimizer.precompute_4cut`, если файл отсутствует. **Результат:** `wc -l nand_optimizer/aig_db_4.py` = 35 (было 65 539); 25/25 pytest-тестов проходят, 8-bit JK-counter регрессия (256 шагов × 4 сценария) ок.
+
+* [x] **`mapping/circ_export/` — разбиение монолитного экспортёра на пакет:** `nand_optimizer/mapping/circ_export.py` (648 строк) разбит на подпакет `mapping/circ_export/` из 5 модулей с разделением ответственности:
+  - `_layout.py` — разделяемые координатные константы и `_snap()`
+  - `_decoder_builder.py` — `_DecoderBuilder` (NAND-конус → XML компоненты)
+  - `_decoder.py` — `export_circ()` (комбинационный декодер)
+  - `_fsm.py` — `export_fsm_circ()` (FSM с D/JK-триггерами)
+  - `_counter.py` — новая функция `export_counter_circ()` (универсальный JK-счётчик с поддержкой `use_bus=True` для Splitter-пинов в Logisim)
+
+  Публичный API пакета (`__init__.py`): `export_circ`, `export_fsm_circ`, `export_counter_circ` — обратная совместимость сохранена. Добавлена функция `export_counter_circ(result, path, bits, circuit_name, use_bus=False)`: при `use_bus=True` скалярные D/LIMIT-входы и Q-выходы заменяются шинами со Splitter'ами в Logisim, что упрощает проводку в учебных схемах. `universal_reversible_counter(bits, script=None)` теперь принимает параметр `script` и пробрасывает его в `finalize()` (ранее был захардкожен `'rewrite; fraig; balance'`). CLI добавил флаг `--bus` к команде `jkcounter`. `export_counter_circ` добавлена в `__all__` пакета.
+
+* [x] **CI — обновление матрицы Python и версий Actions:** Dropped Python 3.9 (EOL) из test-matrix; матрица теперь `['3.11', '3.12']`. Обновлены версии actions: `actions/checkout@v4 → v6`, `actions/setup-python@v5 → v6`. Исправлен путь загрузки EPFL-бенчмарков. Добавлен `dd` в `requirements.txt` (нужен для команды `bdd` в synthesis scripts).
+
 ---
 
-## Фаза 7 (续)
+## Фаза 7 (продолжение)
 
 * [x] **ATPG (Automatic Test Pattern Generation):** Новый модуль [nand_optimizer/atpg.py](nand_optimizer/atpg.py). SAT-based stuck-at fault detection и test-pattern generation. Функции:
   - `enumerate_stuck_at_faults(aig, output_lits)` → `List[Fault]` — перечисление всех stuck-at-0 и stuck-at-1 неисправностей на каждом узле

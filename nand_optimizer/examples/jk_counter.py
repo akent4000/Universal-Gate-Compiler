@@ -30,10 +30,10 @@ Semantics
     LOAD=1:
         Q_next[i] = D[i]                       (parallel load)
 
-    LOAD=0, UP=1, Q == LIMIT:
+    LOAD=0, UP=1, Q >= LIMIT:
         Q_next[i] = 0                           (upper roll-over to 0)
 
-    LOAD=0, UP=1, Q != LIMIT:
+    LOAD=0, UP=1, Q < LIMIT:
         Q_next[i] = Q[i] XOR C[i]              (count up via ripple carry)
 
     LOAD=0, UP=0, Q == 0:
@@ -60,7 +60,7 @@ J/K excitation (per bit)
 where:
     T_i         = (UP & C_i) | (~UP & B_i)
     Count_enable = ~Rollover & (UP | ~Z)
-    Rollover    = UP & EQ(Q, LIMIT)
+    Rollover    = UP & GTE(Q, LIMIT)
     Z           = zero_detect(Q)
 
 Count_enable suppresses the toggle term whenever the counter is about to
@@ -77,7 +77,7 @@ from typing import List, Tuple
 
 from ..datapath.structural import StructuralModule
 from ..datapath.datapath   import (
-    eq_comparator, zero_detect,
+    gte_comparator, zero_detect,
     ripple_up_carry, ripple_down_borrow,
     jk_excitation,
 )
@@ -87,7 +87,7 @@ from ..datapath.datapath   import (
 #  Combinational cone synthesis
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def universal_reversible_counter(bits: int = 8):
+def universal_reversible_counter(bits: int = 8, script: str = None):
     """
     Build and synthesize the JK-excitation combinational cone for an
     *bits*-bit universal reversible counter.
@@ -114,8 +114,8 @@ def universal_reversible_counter(bits: int = 8):
 
     # ── Terminal conditions ───────────────────────────────────────────────────
 
-    # Rollover: counting UP and Q has reached LIMIT → wrap to 0
-    Rollover  = m.and2(UP, eq_comparator(m, q, limit))
+    # Rollover: counting UP and Q has reached or exceeded LIMIT → wrap to 0
+    Rollover  = m.and2(UP, gte_comparator(m, q, limit))
     nRollover = m.not1(Rollover)
 
     # Z: Q == 0 → when counting DOWN, wrap to LIMIT
@@ -174,7 +174,7 @@ def universal_reversible_counter(bits: int = 8):
         m.add_output(f'J{i}', J_i)
         m.add_output(f'K{i}', K_i)
 
-    return m.finalize(script='rewrite; fraig; balance', verbose=False)
+    return m.finalize(script=script, verbose=False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -197,7 +197,7 @@ def _reference_step(
     if load:
         nxt = d_val
     elif up:
-        nxt = 0 if q_val == limit_val else q_val + 1
+        nxt = 0 if q_val >= limit_val else q_val + 1
     else:
         nxt = limit_val if q_val == 0 else q_val - 1
 

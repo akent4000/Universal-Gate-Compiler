@@ -15,6 +15,7 @@ Arithmetic:
 
 Comparators / detectors:
     eq_comparator(m, a_lits, b_lits)       → lit  (a == b)
+    gte_comparator(m, a_lits, b_lits)      → lit  (a >= b, unsigned)
     zero_detect(m, a_lits)                 → lit  (a == 0)
     ones_detect(m, a_lits)                 → lit  (a == all-ones)
 
@@ -99,6 +100,34 @@ def eq_comparator(
         return m.const1()
     eqs = [m.xnor2(a, b) for a, b in zip(a_lits, b_lits)]
     return m.and_tree(eqs)
+
+
+def gte_comparator(
+    m:      StructuralModule,
+    a_lits: List[Lit],
+    b_lits: List[Lit],
+) -> Lit:
+    """
+    N-bit unsigned greater-than-or-equal comparator.  Returns 1 iff a >= b.
+
+    MSB-to-LSB scan: tracks (strictly_greater, equal_so_far).
+      bit_gt[i] = A[i] & ~B[i]
+      bit_eq[i] = XNOR(A[i], B[i])
+      gt ← gt | (eq & bit_gt);  eq ← eq & bit_eq
+    Result: gt | eq
+    """
+    if len(a_lits) != len(b_lits):
+        raise ValueError("gte_comparator: buses must have the same width")
+    if not a_lits:
+        return m.const1()
+    gt = m.const0()
+    eq = m.const1()
+    for i in range(len(a_lits) - 1, -1, -1):
+        bit_gt = m.and2(a_lits[i], m.not1(b_lits[i]))
+        bit_eq = m.xnor2(a_lits[i], b_lits[i])
+        gt = m.or2(gt, m.and2(eq, bit_gt))
+        eq = m.and2(eq, bit_eq)
+    return m.or2(gt, eq)
 
 
 def zero_detect(m: StructuralModule, a_lits: List[Lit]) -> Lit:

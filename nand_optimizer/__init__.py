@@ -13,7 +13,7 @@ Pipeline:
 """
 
 # ─── Bootstrap: auto-generate the 4-input NPN template DB on first import ───
-# aig_db_4.py is a ~5.7 MB generated file and is not tracked in git. When it
+# aig_db_4.pkl is a ~2 MB binary pickle and is not tracked in git.  When it
 # is missing we invoke `python -m nand_optimizer.precompute_4cut` as a
 # subprocess: that module's `if __name__ == '__main__':` block calls
 # generate_db() which fans out to a multiprocessing Pool.  Running the
@@ -23,19 +23,19 @@ Pipeline:
 # The subprocess inherits an env guard so that neither it nor its Pool
 # workers re-enter this bootstrap: when the guard is set, we skip all
 # submodule imports (including any that would hit the still-missing
-# aig_db_4.py).
+# aig_db_4.pkl).
 import os as _os
 
 if _os.environ.get('_NAND_OPTIMIZER_BOOTSTRAPPING') == '1':
     # Inside the bootstrap subprocess (or one of its Pool workers): skip all
-    # submodule imports so nothing tries to load the still-missing aig_db_4.py.
+    # submodule imports so nothing tries to load the still-missing aig_db_4.pkl.
     del _os
 else:
     from . import precompute_4cut as _precompute_4cut
     if not _os.path.exists(_precompute_4cut.DB_PATH):
         import subprocess as _subprocess
         import sys as _sys
-        print("[nand_optimizer] aig_db_4.py not found - generating NPN template DB "
+        print("[nand_optimizer] aig_db_4.pkl not found - generating NPN template DB "
               "(one-time, parallel)...", flush=True)
         _env = dict(_os.environ)
         _env['_NAND_OPTIMIZER_BOOTSTRAPPING'] = '1'
@@ -67,7 +67,8 @@ else:
     from .analysis.switching         import SwitchingActivity, estimate_switching
     from .synthesis.exact_synthesis  import (exact_synthesize, evaluate_template,
                                              exact_cache_stats, exact_cache_clear)
-    from .mapping.circ_export        import export_circ, export_fsm_circ
+    from .mapping.circ_export        import (export_circ, export_fsm_circ,
+                                              export_counter_circ)
     from .io.dot_export              import aig_to_dot
     from .io.aiger_io                import write_aiger, read_aiger
     from .io.blif_io                 import write_blif, read_blif
@@ -115,7 +116,7 @@ else:
         'exact_synthesize', 'evaluate_template',
         'exact_cache_stats', 'exact_cache_clear',
         # export
-        'export_circ', 'export_fsm_circ', 'aig_to_dot',
+        'export_circ', 'export_fsm_circ', 'export_counter_circ', 'aig_to_dot',
         # AIGER / BLIF interchange
         'write_aiger', 'read_aiger', 'write_blif', 'read_blif',
         # FSM synthesis (Phase 3)

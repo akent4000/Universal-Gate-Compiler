@@ -2,7 +2,7 @@
 Precompute the 4-input NPN template database consumed by :mod:`rewrite`
 and :mod:`dont_care`.
 
-The output file ``aig_db_4.py`` is ~5.7 MB of generated Python and is not
+The output file ``aig_db_4.pkl`` is a binary pickle (~2 MB) and is not
 tracked in git.  It is regenerated on demand by :func:`generate_db`, which
 is invoked automatically from :mod:`nand_optimizer.__init__` on first
 import if the file is missing.  Running this module as a script forces a
@@ -17,10 +17,11 @@ min pair, so the final DB is byte-identical regardless of worker count.
 
 from __future__ import annotations
 import os
+import pickle
 import time
 import multiprocessing as mp
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "aig_db_4.py")
+DB_PATH = os.path.join(os.path.dirname(__file__), "aig_db_4.pkl")
 
 # Set in the main process before spawning Pool workers so that, when a
 # worker imports `nand_optimizer.precompute_4cut` to reach `_scan_pairs`,
@@ -201,46 +202,45 @@ def generate_db(output_path: str = DB_PATH, *,
               f"(workers={workers})")
         print(f"Writing db to {output_path}...")
 
-    with open(output_path, 'w') as f:
-        f.write("# Auto-generated Boolean Matching DB\n")
-        f.write("AIG_DB_4 = {\n")
-        for tt in range(65536):
-            if tt not in tt_to_lit: continue
+    db = {}
+    for tt in range(65536):
+        if tt not in tt_to_lit: continue
 
-            final_lit = tt_to_lit[tt]
+        final_lit = tt_to_lit[tt]
 
-            ops = []
-            visited = {}
-            op_idx = 10
+        ops = []
+        visited = {}
+        op_idx = 10
 
-            def walk(lit):
-                nonlocal op_idx
-                if lit < 10:
-                    return lit
+        def walk(lit):
+            nonlocal op_idx
+            if lit < 10:
+                return lit
 
-                is_neg = (lit % 2 == 1)
-                base_lit = lit - 1 if is_neg else lit
+            is_neg = (lit % 2 == 1)
+            base_lit = lit - 1 if is_neg else lit
 
-                if base_lit in visited:
-                    res = visited[base_lit]
-                    return res ^ 1 if is_neg else res
+            if base_lit in visited:
+                res = visited[base_lit]
+                return res ^ 1 if is_neg else res
 
-                args = lit_to_args[base_lit]
-                a_mapped = walk(args[0])
-                b_mapped = walk(args[1])
+            args = lit_to_args[base_lit]
+            a_mapped = walk(args[0])
+            b_mapped = walk(args[1])
 
-                my_idx = op_idx
-                op_idx += 2
+            my_idx = op_idx
+            op_idx += 2
 
-                ops.append((a_mapped, b_mapped))
-                visited[base_lit] = my_idx
+            ops.append((a_mapped, b_mapped))
+            visited[base_lit] = my_idx
 
-                return my_idx ^ 1 if is_neg else my_idx
+            return my_idx ^ 1 if is_neg else my_idx
 
-            out_lit = walk(final_lit)
+        out_lit = walk(final_lit)
+        db[tt] = (out_lit, ops)
 
-            f.write(f"  {tt}: ({out_lit}, {repr(ops)}),\n")
-        f.write("}\n")
+    with open(output_path, 'wb') as f:
+        pickle.dump(db, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 if __name__ == '__main__':

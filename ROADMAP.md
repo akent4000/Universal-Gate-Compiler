@@ -158,21 +158,19 @@ nand_optimizer` не тормозит на bootstrap, CLAUDE.md обновлён
 
 ---
 
-### 4. `aig_db_4.py` — 65k-строчный Python-файл как хранилище данных
+### 4. ~~`aig_db_4.py` — 65k-строчный Python-файл как хранилище данных~~ ✅
 
-**Симптом.** Grep по кодовой базе спотыкается о БД; IDE открывает её как
-source и лезет его парсить. Это данные, не код.
+**Решение.** `precompute_4cut.py` теперь сериализует БД в
+`aig_db_4.pkl` (binary pickle, ~3.6 МБ vs 5.5 МБ Python-текста).
+`aig_db_4.py` превращён в тонкий (~35 строк) lazy-loader: модуль-уровневый
+`__getattr__` вызывает `pickle.load` при первом обращении к `AIG_DB_4`,
+потом кеширует. Все старые `from ..aig_db_4 import AIG_DB_4` в rewrite.py,
+dont_care.py, bidec.py, sat_resub.py работают без изменений. `.gitignore`
+игнорирует `.pkl`; bootstrap в `__init__.py` пересобирает pickle через
+subprocess `python -m nand_optimizer.precompute_4cut`, если файла нет.
 
-**Путь исправления.**
-1. В `precompute_4cut.py` сериализовать результат в `aig_db_4.pkl`
-   (`pickle.dump` или `numpy.savez` — 16-bit индексы templates влезают в
-   uint16-массивы).
-2. В `rewrite.py` / `__init__.py` лениво грузить через `pickle.load` при
-   первом обращении.
-3. Удалить генерацию `.py`-файла; `.gitignore` обновить.
-
-**Готово, когда:** `wc -l nand_optimizer/*.py` не содержит 65k-строчного
-файла; bootstrap время и lookup-латентность не выросли.
+**Результат.** `wc -l nand_optimizer/aig_db_4.py` = 35 (было 65539).
+25/25 pytest-тестов проходят, 8-bit JK-counter регрессия (256 шагов) ок.
 
 ---
 
@@ -298,7 +296,7 @@ P0#2 (CI + QoR snapshot)   ✅ ──┘ база доверия
          │
          ▼
 P1#3 (package layout)      ✅
-P1#4 (aig_db as .pkl)
+P1#4 (aig_db as .pkl)      ✅
 P1#5 (numpy FRAIG)
          │
          ▼

@@ -48,7 +48,7 @@ if __name__ == '__main__' and __package__ is None:
         sys.path.insert(0, _root)
     __package__ = 'nand_optimizer'
 
-from .examples.circuits   import seven_segment, two_bit_adder, bcd_to_excess3
+from .examples.circuits   import seven_segment, two_bit_adder, bcd_to_excess3, multi_7seg
 from .examples.benchmarks import (hamming_weight_5, parity_9,
                                   multiplier_3x3, multiplier_4x4,
                                   misex1, z4ml)
@@ -57,7 +57,8 @@ from .examples.jk_counter  import (universal_reversible_counter,
                                     run_jkcounter_regression)
 from .pipeline                import optimize, hierarchical_optimize
 from .testing.tests           import run_tests
-from .mapping.circ_export     import export_circ, export_fsm_circ
+from .mapping.circ_export     import (export_circ, export_fsm_circ,
+                                      export_counter_circ)
 from .io.dot_export           import aig_to_dot
 from .io.aiger_io             import write_aiger, read_aiger
 from .io.blif_io              import write_blif, read_blif
@@ -147,7 +148,7 @@ def _export_blif_path(result, tt, path: str, label: str) -> None:
 def run_one(key, verbose=True, circ_path=None,
             verify=False, profile=False, dot_path=None, script=None,
             aiger_path=None, blif_path=None, atpg=False,
-            bandit_horizon=0, bandit_strategy='ucb1'):
+            bandit_horizon=0, bandit_strategy='ucb1', use_bus=False):
     label, factory = CIRCUITS[key]
     print(f'\n{chr(9619) * 68}')
     print(f'  {label}')
@@ -166,7 +167,7 @@ def run_one(key, verbose=True, circ_path=None,
         _print_atpg(run_atpg(result.builder.gates, tt.input_names, out_wires))
 
     if circ_path:
-        export_circ(result, circ_path, sanitize_for_logisim(label))
+        export_circ(result, circ_path, sanitize_for_logisim(label), use_bus=use_bus)
 
     if dot_path and result.aig is not None:
         dot_str = aig_to_dot(result.aig, result.out_lits, tt.output_names, title=label)
@@ -405,6 +406,12 @@ def main():
                              'any input sequence of length ≤ K. Typical: 10–20.')
     parser.add_argument('--bits', type=int, default=8,
                         help='Bit width for jkcounter structural example (default: 8)')
+    parser.add_argument('--bus', action='store_true',
+                        help='Group inputs/outputs into bus Pins with Splitters in the '
+                             'exported .circ file.  Works for any --circ target whose '
+                             'pin names follow the {prefix}_{int} convention (e.g. '
+                             '7seg2, 7seg3, PLA files produced by gen_binary_7seg_pla.py).'
+                             '  For jkcounter, collapses D/LIMIT/Q as before.')
     parser.add_argument('--compose', metavar='JSON_FILE',
                         help='Hierarchical multi-stage synthesis: path to a JSON '
                              'composition spec. See myPLAfiles/bcd_7seg_composition.json '
@@ -458,13 +465,16 @@ def main():
         print(f'\n{chr(9619) * 68}')
         print(f'  Universal Reversible JK Counter ({bits}-bit, structural AIG)')
         print(f'{chr(9619) * 68}')
-        result = universal_reversible_counter(bits)
+        result = universal_reversible_counter(bits, script=args.script)
         print(f'\n  Synthesized: {result.total_nand} NAND gates  '
               f'({bits} JK-FF, {3 * bits + 2} inputs, {2 * bits} outputs)')
         ok = run_jkcounter_regression(bits, verbose=verbose)
         if args.circ:
-            export_circ(result, args.circ,
-                        sanitize_for_logisim(f'JKCounter_{bits}bit'))
+            export_counter_circ(
+                result, args.circ, bits=bits,
+                circuit_name=sanitize_for_logisim(f'JKCounter_{bits}bit'),
+                use_bus=args.bus,
+            )
             print(f'\n  Logisim .circ written to: {args.circ}')
         sys.exit(0 if ok else 1)
 
@@ -681,7 +691,8 @@ def main():
             out_wires = [result[name].out_wire for name in tt.output_names]
             _print_atpg(run_atpg(result.builder.gates, tt.input_names, out_wires))
         if args.circ:
-            export_circ(result, args.circ, sanitize_for_logisim(label))
+            export_circ(result, args.circ, sanitize_for_logisim(label),
+                        use_bus=args.bus)
         if args.dot and result.aig is not None:
             dot_str = aig_to_dot(result.aig, result.out_lits, tt.output_names,
                                  title=label)
@@ -713,7 +724,8 @@ def main():
         print(f'\n  Synthesized: {result.total_nand} NAND gates  '
               f'({tt.n_inputs} input bits, {tt.n_outputs} output bits)')
         if args.circ:
-            export_circ(result, args.circ, sanitize_for_logisim(label))
+            export_circ(result, args.circ, sanitize_for_logisim(label),
+                        use_bus=args.bus)
         if args.dot and result.aig is not None:
             dot_str = aig_to_dot(result.aig, result.out_lits, tt.output_names,
                                  title=label)
@@ -736,6 +748,28 @@ def main():
                            dot_path=args.dot)
         sys.exit(0 if ok else 1)
 
+    # Multi-display 7-segment (7seg1, 7seg2, 7seg3, …)
+    if target.startswith('7seg') and target[4:].isdigit():
+        n_disp = int(target[4:])
+        if n_disp >= 1:
+            label = f'{n_disp}-digit 7-segment decoder'
+            print(f'\n{chr(9619) * 68}')
+            print(f'  {label}')
+            print(f'{chr(9619) * 68}')
+            tt     = multi_7seg(n_disp)
+            result = optimize(tt, verbose=verbose, profile=args.profile,
+                              script=args.script,
+                              bandit_horizon=bandit_horizon,
+                              bandit_strategy=bandit_strategy)
+            ok = run_tests(tt, result, verbose=verbose)
+            if args.verify:
+                ok = _print_verification(tt, result) and ok
+            if args.circ:
+                cname = sanitize_for_logisim(f'{n_disp}dig_7seg')
+                export_circ(result, args.circ, cname, use_bus=args.bus)
+                print(f'\n  Logisim .circ written to: {args.circ}')
+            sys.exit(0 if ok else 1)
+
     if target == 'all':
         ok = True
         for key in CIRCUITS.keys():
@@ -745,7 +779,8 @@ def main():
                            aiger_path=args.aiger, blif_path=args.blif,
                            atpg=args.atpg,
                            bandit_horizon=bandit_horizon,
-                           bandit_strategy=bandit_strategy):
+                           bandit_strategy=bandit_strategy,
+                           use_bus=args.bus):
                 ok = False
         sys.exit(0 if ok else 1)
 
@@ -756,10 +791,12 @@ def main():
                      aiger_path=args.aiger, blif_path=args.blif,
                      atpg=args.atpg,
                      bandit_horizon=bandit_horizon,
-                     bandit_strategy=bandit_strategy)
+                     bandit_strategy=bandit_strategy,
+                     use_bus=args.bus)
         sys.exit(0 if ok else 1)
 
-    avail = ", ".join(list(CIRCUITS) + ['all', 'bench', 'epfl', 'epfl-check', 'epfl-download', 'proptest'])
+    avail = ", ".join(list(CIRCUITS) + ['7seg1..7segN', 'all', 'bench',
+                                         'epfl', 'epfl-check', 'epfl-download', 'proptest'])
     print(f'\nUnknown circuit "{target}".\nAvailable: {avail}\n')
     sys.exit(1)
 

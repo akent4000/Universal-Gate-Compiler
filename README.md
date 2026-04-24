@@ -51,7 +51,7 @@ heavy reconvergent fanout use `--odc-mode z3-exact` (see [ROADMAP.md](ROADMAP.md
 pip install -r requirements.txt
 ```
 
-Dependencies: `z3-solver`, `hypothesis`, `pytest`. Python 3.9+ required.
+Dependencies: `z3-solver`, `dd`, `hypothesis`, `pytest`. Python 3.11+ required.
 
 ---
 
@@ -120,6 +120,7 @@ python -m nand_optimizer rd53  --bandit 30 --bandit-strategy thompson
 
 # Structural JK counter example (Phase 3.5, --bits chooses width)
 python -m nand_optimizer jkcounter --bits 8 --circ counter8.circ
+python -m nand_optimizer jkcounter --bits 8 --circ counter8.circ --bus  # scalar pins → buses (Splitters in Logisim)
 
 # Bounded Model Checking for FSMs (K clock cycles, Z3-backed)
 python -m nand_optimizer fsm:seq101 --bmc-bound 16
@@ -182,7 +183,7 @@ replacement for ABC or commercial EDA. Known gaps:
   z3 time on `multiplier` / `sin` / etc.), nor run CEC on auto-composed
   designs. Pre-merge confidence comes from the 9-circuit QoR snapshot
   ([benchmarks/qor_baseline.json](benchmarks/qor_baseline.json), +5%
-  tolerance) — not from broad coverage.
+  tolerance) — not from broad coverage. CI runs on Python 3.11 and 3.12.
 
 If any of these block you for a specific use case, open an issue — the fix
 path for each is documented in [ROADMAP.md](ROADMAP.md).
@@ -534,9 +535,11 @@ v = bmc_verify(fsm_result, bound=16)
 ### Export to Logisim Evolution
 
 ```python
-from nand_optimizer import export_circ
+from nand_optimizer import export_circ, export_fsm_circ, export_counter_circ
 
 export_circ(result, 'my_circuit.circ', circuit_name='decoder')
+export_fsm_circ(fsm_result, 'fsm.circ', circuit_name='seq101')
+export_counter_circ(counter_result, 'counter.circ', bits=8, circuit_name='JKCounter_8bit', use_bus=True)
 ```
 
 ### Visualise the AIG (Graphviz)
@@ -600,7 +603,7 @@ rd53, parity9, mult3, misex1, z4ml, mult4`) under the default script; any
 current run exceeding `baseline * 1.05` fails `test_qor_snapshot.py` with a
 diagnostic pointing at the refresh script. CI
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs this suite on
-Python 3.9 and 3.11 for every push and PR.
+Python 3.11 and 3.12 for every push and PR.
 
 ### EPFL Combinational Benchmark Suite
 
@@ -634,14 +637,15 @@ The package is organised by layer; top-level orchestrators wire subpackages toge
 
 ```
 nand_optimizer/
-├── __init__.py          # Public API (+ bootstrap for aig_db_4.py)
+├── __init__.py          # Public API (+ bootstrap for aig_db_4.pkl)
 ├── __main__.py          # CLI entry point
 ├── pipeline.py          # optimize() + hierarchical_optimize() — full multi-output pipeline
 ├── script.py            # Synthesis script parser + executor + ScriptBandit (UCB1 / Thompson)
 ├── verify.py            # Miter + BMC formal equivalence (Z3 / exhaustive / bounded unroll)
 ├── auto_compose.py      # Symmetric-output detection + hierarchical spec generator
-├── precompute_4cut.py   # Parallel generator for aig_db_4.py (run as subprocess on first import)
-├── aig_db_4.py          # Precomputed 4-input NPN template DB (auto-generated, gitignored)
+├── precompute_4cut.py   # Parallel generator for aig_db_4.pkl (run as subprocess on first import)
+├── aig_db_4.py          # Thin lazy-loader (~35 lines): loads aig_db_4.pkl on first AIG_DB_4 access
+├── aig_db_4.pkl         # Binary pickle of precomputed NPN templates (~2 MB, auto-generated, gitignored)
 │
 ├── core/                # Core data structures
 │   ├── aig.py               # And-Inverter Graph — structural hashing, GC, snapshot/restore
@@ -663,7 +667,12 @@ nand_optimizer/
 │
 ├── mapping/             # AIG → NAND technology mapping
 │   ├── nand.py              # NANDBuilder — final NAND network + XOR/XNOR extraction
-│   └── circ_export.py       # Logisim Evolution 4.x .circ exporter (combinational + FSM)
+│   └── circ_export/         # Logisim Evolution 4.x .circ exporter (package)
+│       ├── _layout.py           # Shared coordinate constants + _snap()
+│       ├── _decoder_builder.py  # _DecoderBuilder — NAND cone → XML
+│       ├── _decoder.py          # export_circ() — combinational decoder
+│       ├── _fsm.py              # export_fsm_circ() — FSM with D/JK flip-flops
+│       └── _counter.py          # export_counter_circ() — universal JK counter with buses
 │
 ├── io/                  # File-format interchange
 │   ├── aiger_io.py          # AIGER 1.9 reader/writer (ASCII .aag + binary .aig)
