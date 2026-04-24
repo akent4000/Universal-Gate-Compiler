@@ -258,21 +258,22 @@ silent-miscompile.
 
 ---
 
-### 7. Bandit / auto-compose / BDD-rebuild / SAT-resub — QoR не измерены
+### 7. Bandit / auto-compose / BDD-rebuild / SAT-resub — QoR не измерены ✅
 
-**Симптом.** Каждый из этих проходов есть в коде и в README, но нет ответа
-на вопрос «насколько лучше baseline на EPFL?». Риск breadth-over-depth.
+**Решение.** [`benchmarks/pass_eval.md`](benchmarks/pass_eval.md) содержит
+полные результаты для 4 проходов на EPFL subset (harness:
+[`benchmarks/run_pass_eval.py`](benchmarks/run_pass_eval.py)):
 
-**Путь исправления.** Для каждого прохода:
-1. Прогнать EPFL subset с / без прохода, записать в
-   `benchmarks/pass_eval.md` таблицу `(benchmark, baseline_area,
-   with_pass_area, delta_%, wall_time_delta_%)`.
-2. Если delta < 2% на всём subset — пометить проход `experimental` в
-   `--help` и в README; рассмотреть удаление, если depth не планируется.
-3. Если delta > 5% — описать в README, **на каких классах схем** проход
-   выигрывает (arithmetic? control? dense SOPs?).
+| pass            | subset | mean Δarea  | mean Δtime    | wins/ties/regs | verdict |
+|-----------------|--------|------------:|--------------:|---------------:|---------|
+| `XAG (-x)`      | 11     | **−4.3%**   | +2.0%         | 3/8/0          | production-ready opt-in (см. P3#8 Phase 5) |
+| `bandit (h=20)` | 7      | **−15.4%**  | +3 966.2%     | 5/2/0          | best QoR, batch exploration mode |
+| `+bdd`          | 7      | +0.8%       | +49.7%        | 0/5/2          | **experimental** — нет area-выигрыша |
+| `+resub`        | 3      | −6.1%       | +46 056.6%    | 2/0/1          | **experimental** — wall-time prohibitive |
 
-**Готово, когда:** ни один пасс в дефолтном скрипте не существует «на веру».
+В README/`script.py` помечены `bdd` и `resub` как experimental с явной
+ссылкой на pass_eval.md. `bandit` описан как high-effort mode с EPFL-цифрами.
+`auto-compose` остаётся вне eval'а (PLA-only CLI helper, не script command).
 
 ---
 
@@ -315,13 +316,31 @@ silent-miscompile.
 **Регрессия:** 25/25 pytest-тестов проходят, все built-in схемы (7seg 62/62,
 adder 41/41, excess3, rd53 и др.) проходят T1–T13, QoR baseline не нарушен.
 
-**Оставшееся (Phase 5+, опционально):**
-- NAND-cost-aware compar в `rewrite_aig` (AND=2, XOR=4 NAND-gates), чтобы
-  включить `use_xag=True` по умолчанию без регрессии.
+**Phase 5 (NAND-cost-aware comparator):** ✅ **выполнено.**
+[`synthesis/rewrite.py:rewrite_aig`](nand_optimizer/synthesis/rewrite.py)
+теперь оценивает кандидатов взвешенно: новые узлы шаблона `n_new_and·2 +
+n_new_xor·4` против MFFC `Σ(2 if AND else 4)`. AIG_DB_4 и XAG_DB_4
+сравниваются между собой по этой метрике (старая селекция «по `len(ops)`»
+удалена). Флаг `-x` пробрашен в команду `rewrite`. EPFL результаты
+(см. [pass_eval.md](benchmarks/pass_eval.md)): adder −24.7%, router −17.2%,
+sin −5.1%, **0 регрессий на 11 EPFL** circuits. Mean Δarea = −4.3%, mean
+Δtime = +2.0%.
+
+**Почему default остаётся `use_xag=False`:** на cube-cover built-in `rd53`
+регрессия 40 → 45 NAND (+12%). Корень — interaction с post-mapping
+XOR-extractor в [`mapping/nand.py`](nand_optimizer/mapping/nand.py),
+который уже сжимает 3-AND XOR-кластеры в 4-NAND форму. Локальная модель
+rewriter'а оценивает 3 ANDa в 6 NAND и предпочитает native XOR (4 NAND),
+что блокирует FRAIG-шэринг ниже по цепочке. EPFL стартует с AIGER (без
+Espresso), поэтому регрессия там не проявляется. Включить по умолчанию
+можно только после XOR-extractor-aware MFFC cost (тегировать AND-узлы,
+участвующие в потенциальном 3-AND XOR pattern, как cost=4/3 вместо 2).
+
+**Оставшееся (Phase 6+, опционально):**
+- XOR-extractor-aware MFFC cost (см. выше) — разблокирует
+  `use_xag=True` по умолчанию.
 - XOR-aware Don't-Care reasoning (самодуальность XOR).
 - BLIF/Verilog writers, эмитящие XOR-операторы напрямую.
-- EPFL `arithmetic/*`-прогоны для измерения QoR-выигрыша от нативных XOR
-  при `use_xag=True`.
 
 ---
 
@@ -353,10 +372,10 @@ P1#5 (numpy FRAIG)
          │
          ▼
 P2#6 (Verilog subset spec)
-P2#7 (pass QoR eval)
+P2#7 (pass QoR eval)       ✅
          │
          ▼
-P3#8 (XAG)                 ✅
+P3#8 (XAG)                 ✅ (Phase 1–5 done, Phase 6+ optional)
          │
          ▼
 P3#9 (MIG / GPU / ML — по готовности)

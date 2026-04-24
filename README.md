@@ -44,7 +44,13 @@ pattern.  Every synthesis pass (rewrite, FRAIG, balance, don't-care) is
 XOR-aware; the gate mapper emits native XOR nodes directly to the canonical
 4-NAND form.  Rewriting has an optional `XAG_DB_4` template database (87% of
 the 65 536 4-input functions are cheaper in XAG than in pure AIG) — opt in
-via `rewrite_aig(..., use_xag=True)`.
+via the `-x` flag on `rewrite` (`rewrite -x`) or `rewrite_aig(..., use_xag=True)`.
+The cut-replacement comparator weighs `AND = 2 NAND` and `XOR = 4 NAND` so
+XAG templates are accepted only on net NAND saving. EPFL benchmark wins:
+adder −24.7%, router −17.2%, sin −5.1%, zero regressions on the 11-circuit
+subset (see [`benchmarks/pass_eval.md`](benchmarks/pass_eval.md)). Default
+remains off due to a +12% regression on the cube-cover `rd53` built-in
+(post-mapping XOR-extractor interaction).
 
 Steps 7–8 can be replaced by a user-supplied **synthesis script** (see below).
 Default script is `"rewrite; fraig; rewrite; balance"`. `dc` is not in the
@@ -216,6 +222,10 @@ python -m nand_optimizer rd53 --script "rewrite -K 6; fraig; dc -r 3; rewrite -K
 
 # Full Mishchenko-2009 DC flow with exact-synthesis fallback
 python -m nand_optimizer mult4 --script "rewrite; fraig; dc -r 3 --dc-exact --odc; balance"
+
+# XAG templates (AND+XOR) — recommended for arithmetic with XOR structure
+# (adder −24.7%, sin −5.1% on EPFL; see benchmarks/pass_eval.md)
+python -m nand_optimizer epfl --subset arithmetic/adder --script "rewrite -x; fraig; rewrite -x; balance"
 ```
 
 ### Supported commands
@@ -228,14 +238,15 @@ python -m nand_optimizer mult4 --script "rewrite; fraig; dc -r 3 --dc-exact --od
 | `fraig`    | Merge functionally equivalent nodes (simulation + SAT) |
 | `dc`       | Don't-care-aware rewriting (SDC + sim-based ODC, window resub, DC-masked exact synthesis) |
 | `bidec`    | Disjoint-support bi-decomposition `f = g(X) op h(Y)` for AND/OR/XOR (k=5..8 cuts) |
-| `bdd`      | Per-output ROBDD rebuild + sifting reorder + ITE realisation (requires `dd`) |
-| `resub`    | SAT-style functional resubstitution with up to 3 divisors for wide cuts (k=5..7) |
+| `bdd`      | Per-output ROBDD rebuild + sifting reorder + ITE realisation (requires `dd`) — **experimental** (no measurable area win on EPFL subset; mean Δarea +0.8%, see [pass_eval.md](benchmarks/pass_eval.md)) |
+| `resub`    | SAT-style functional resubstitution with up to 3 divisors for wide cuts (k=5..7) — **experimental** (mean Δarea −6.1% on small circuits but ~460× wall-time; see [pass_eval.md](benchmarks/pass_eval.md)) |
 
 ### Flags for `rewrite` / `refactor`
 
 | Flag | Meaning | Default |
 |---|---|---|
 | `-z` | Use exact (SAT-based) synthesis per cut | off |
+| `-x` | Enable XAG_DB_4 templates (AND+XOR); NAND-cost-aware comparator | off |
 | `-r N` | Number of rewriting rounds | 1 |
 | `-K N` | Cut size (max leaves per cut) | 4 |
 
@@ -286,6 +297,11 @@ adaptively. Each arm is a single-command script (`balance`, `rewrite`,
 `(n_before - n_after) / n_before` observed after the step. Implemented in
 [nand_optimizer/script.py](nand_optimizer/script.py) as `ScriptBandit` with
 **UCB1** (default) and **Thompson Sampling** strategies.
+
+On the EPFL 7-circuit subset (h=20): **mean Δarea −15.4%, zero regressions**
+(router −60.7%, i2c −17.3%, ctrl −15.7%, priority −10.9%); wall-time ~40×
+the default script. Best for batch exploration where time is not critical;
+see [`benchmarks/pass_eval.md`](benchmarks/pass_eval.md).
 
 ```bash
 # CLI: 20-step horizon, UCB1

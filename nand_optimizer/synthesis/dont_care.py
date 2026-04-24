@@ -1797,12 +1797,13 @@ def _dc_optimize_once(
                 if mffc_size > max_mffc_size:
                     max_mffc_size = mffc_size
 
-                n_new, final_lit = _count_template_new_nodes(
+                n_new_and, n_new_xor, final_lit = _count_template_new_nodes(
                     new_aig, ordered_cut, tmpl_out, ops, k, lit_map,
                 )
                 if final_lit is None:
                     continue
 
+                n_new = n_new_and + n_new_xor
                 net = n_new - mffc_size
                 if net < best_net:
                     best_net    = net

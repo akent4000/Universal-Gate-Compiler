@@ -198,14 +198,15 @@ def _count_template_new_nodes(
     ops:             List[Tuple[int, int]],
     cut_size:        int,
     lit_map:         Dict[int, int],
-) -> Tuple[Optional[int], Optional[int]]:
+) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     """
-    How many new AND nodes would applying this template add to ``new_aig``?
+    How many new AND / XOR nodes would applying this template add to ``new_aig``?
 
     Does NOT mutate ``new_aig``.  Uses structural-hash lookup for collisions
     with existing nodes plus a virtual-literal table to model intra-template
-    sharing.  Returns (n_new, final_lit).  If the template is malformed or
-    references a literal that is not producible, returns (None, None).
+    sharing.  Returns (n_new_and, n_new_xor, final_lit).  If the template is
+    malformed or references a literal that is not producible, returns
+    (None, None, None).
     """
     sim: Dict[int, int]            = {0: FALSE, 1: TRUE}
     for j, c_id in enumerate(ordered_cut):
@@ -217,7 +218,8 @@ def _count_template_new_nodes(
     op_base         = 2 + 2 * cut_size
     virtual_counter = _VIRTUAL_BASE
     virtual_map:     Dict[Tuple[int, int], int] = {}
-    n_new = 0
+    n_new_and = 0
+    n_new_xor = 0
 
     def fresh_virtual() -> int:
         nonlocal virtual_counter
@@ -232,7 +234,7 @@ def _count_template_new_nodes(
             ta, tb = op_entry
             op_kind = 0   # AND (backward compat with AIG_DB_4)
         if ta not in sim or tb not in sim:
-            return (None, None)
+            return (None, None, None)
         m_a = sim[ta]
         m_b = sim[tb]
 
@@ -262,7 +264,7 @@ def _count_template_new_nodes(
                 else:
                     result = fresh_virtual()
                     virtual_map[vkey] = result
-                    n_new += 1
+                    n_new_xor += 1
         else:              # AND
             if m_a > m_b:
                 m_a, m_b = m_b, m_a
@@ -285,14 +287,14 @@ def _count_template_new_nodes(
                 else:
                     result = fresh_virtual()
                     virtual_map[vkey] = result
-                    n_new += 1
+                    n_new_and += 1
 
         sim[op_base + 2 * op_idx]     = result
         sim[op_base + 2 * op_idx + 1] = result ^ 1
 
     if template_out not in sim:
-        return (None, None)
-    return (n_new, sim[template_out])
+        return (None, None, None)
+    return (n_new_and, n_new_xor, sim[template_out])
 
 
 def _apply_template(
@@ -397,13 +399,14 @@ def rewrite_aig(
             new_a = lit_map[old_a]
             new_b = lit_map[old_b]
 
-            # Cost of the default (base) translation in terms of *new* AND nodes.
+            # NAND-weighted cost model: AND → 2 NANDs, XOR → 4 NANDs.
+            # Default translation emits one AND in new_aig (or reuses existing).
             base_exists = new_aig.has_and(new_a, new_b)
-            base_cost   = 0 if base_exists else 1
+            base_cost   = 0 if base_exists else 2
 
             # best_choice: None -> base translation.
             best_choice: Optional[Tuple[int, List[int], int, List[Tuple[int, int]]]] = None
-            best_net = base_cost          # net new-node count (lower is better)
+            best_net = base_cost          # net new-NAND count (lower is better)
 
             for cut in cuts[old_id]:
                 if len(cut) <= 1:
@@ -417,52 +420,53 @@ def rewrite_aig(
                 tt, ordered_cut = evaluate_cut_tt(current_aig, old_id, cut)
                 k              = len(ordered_cut)
 
-                template = None
+                # Collect candidate templates: AIG_DB_4 (AND-only) and XAG_DB_4
+                # (AND+XOR). The weighted comparator below picks the best.
+                candidates: List[Tuple[int, List[Tuple[int, ...]]]] = []
                 if k <= 4 and tt in AIG_DB_4:
-                    template = AIG_DB_4[tt]
-                # Try XAG template; prefer it if it yields fewer new nodes.
+                    candidates.append(AIG_DB_4[tt])
                 if k <= 4 and tt in xag_db:
-                    xag_tmpl = xag_db[tt]
-                    if template is None:
-                        template = xag_tmpl
-                    else:
-                        # Quick cost compare: prefer whichever has fewer ops.
-                        if len(xag_tmpl[1]) < len(template[1]):
-                            template = xag_tmpl
-                if template is None and use_exact:
+                    candidates.append(xag_db[tt])
+                if not candidates and use_exact:
                     try:
                         from .exact_synthesis import exact_synthesize
-                        template = exact_synthesize(
+                        tmpl = exact_synthesize(
                             tt, k,
                             max_gates   = exact_max_gates,
                             timeout_ms  = exact_timeout_ms,
                         )
+                        if tmpl is not None:
+                            candidates.append(tmpl)
                     except ImportError:
-                        template = None
+                        pass
 
-                if template is None:
+                if not candidates:
                     continue
 
-                tmpl_out, ops = template
+                # MFFC cost in NAND units: sum weights of each freed node.
+                mffc = _compute_mffc(current_aig, old_id, cut, ref_old)
+                mffc_nand = 0
+                for n in mffc:
+                    kind = current_aig._nodes[n - 1][0]
+                    mffc_nand += 4 if kind == 'xor' else 2
 
-                mffc      = _compute_mffc(current_aig, old_id, cut, ref_old)
-                mffc_size = len(mffc)
+                for template in candidates:
+                    tmpl_out, ops = template
+                    n_new_and, n_new_xor, final_lit = _count_template_new_nodes(
+                        new_aig, ordered_cut, tmpl_out, ops, k, lit_map,
+                    )
+                    if final_lit is None:
+                        continue
 
-                n_new, final_lit = _count_template_new_nodes(
-                    new_aig, ordered_cut, tmpl_out, ops, k, lit_map,
-                )
-                if final_lit is None:
-                    continue
-
-                # Net change in reachable-from-output gates in new_aig if we
-                # apply this template instead of the base translation:
-                #   ΔG = n_new - mffc_size
-                # (MFFC contributions get translated regardless but become
-                # dead after replacement, so aig_to_gates drops them.)
-                net = n_new - mffc_size
-                if net < best_net:
-                    best_net    = net
-                    best_choice = (tmpl_out, ordered_cut, k, ops)
+                    # Net change in NAND gates if we apply this template:
+                    #   ΔN = (2·n_new_and + 4·n_new_xor) - mffc_nand
+                    # (MFFC nodes become dead after replacement; aig_to_gates
+                    # drops them, so their NAND cost is recovered.)
+                    n_new_nand = 2 * n_new_and + 4 * n_new_xor
+                    net = n_new_nand - mffc_nand
+                    if net < best_net:
+                        best_net    = net
+                        best_choice = (tmpl_out, ordered_cut, k, ops)
 
             if best_choice is not None:
                 tmpl_out, ordered_cut, k_sel, ops = best_choice

@@ -36,10 +36,10 @@ Semantics
     LOAD=0, UP=1, Q < LIMIT:
         Q_next[i] = Q[i] XOR C[i]              (count up via ripple carry)
 
-    LOAD=0, UP=0, Q == 0:
-        Q_next[i] = LIMIT[i]                   (lower wrap to LIMIT)
+    LOAD=0, UP=0, Q == 0 or Q > LIMIT:
+        Q_next[i] = LIMIT[i]                   (lower wrap / out-of-range snap)
 
-    LOAD=0, UP=0, Q != 0:
+    LOAD=0, UP=0, 0 < Q <= LIMIT:
         Q_next[i] = Q[i] XOR B[i]              (count down via ripple borrow)
 
 where:
@@ -59,9 +59,10 @@ J/K excitation (per bit)
 
 where:
     T_i         = (UP & C_i) | (~UP & B_i)
-    Count_enable = ~Rollover & (UP | ~Z)
+    Count_enable = ~Rollover & (UP | ~DownWrap)
     Rollover    = UP & GTE(Q, LIMIT)
     Z           = zero_detect(Q)
+    DownWrap    = Z | GT(Q, LIMIT)          (Q==0 OR Q>LIMIT → snap to LIMIT)
 
 Count_enable suppresses the toggle term whenever the counter is about to
 perform a terminal action (UP-rollover or DOWN-wrap), preventing the
@@ -118,9 +119,14 @@ def universal_reversible_counter(bits: int = 8, script: str = None):
     Rollover  = m.and2(UP, gte_comparator(m, q, limit))
     nRollover = m.not1(Rollover)
 
-    # Z: Q == 0 → when counting DOWN, wrap to LIMIT
-    Z  = zero_detect(m, q)
-    nZ = m.not1(Z)
+    # Z: Q == 0 → part of DOWN-wrap condition
+    Z = zero_detect(m, q)
+
+    # DownWrap: Q == 0 OR Q > LIMIT → snap to LIMIT when counting DOWN
+    # GT(Q, LIMIT) = NOT(GTE(LIMIT, Q))
+    GT_q_limit = m.not1(gte_comparator(m, limit, q))
+    DownWrap   = m.or2(Z, GT_q_limit)
+    nDownWrap  = m.not1(DownWrap)
 
     # ── Toggle-enable chains ──────────────────────────────────────────────────
 
@@ -134,15 +140,15 @@ def universal_reversible_counter(bits: int = 8, script: str = None):
 
     # ── Shared sub-expressions (structural hashing ensures no duplication) ────
 
-    # Count_enable = ~Rollover & (UP | ~Z)
+    # Count_enable = ~Rollover & (UP | ~DownWrap)
     # Suppresses toggle during terminal events to avoid carry/borrow overlap.
-    Count_enable = m.and2(nRollover, m.or2(UP, nZ))
+    Count_enable = m.and2(nRollover, m.or2(UP, nDownWrap))
 
     # ~LOAD & UP & Rollover  — used in K (UP-wrap clears all bits to 0)
     nLOAD_UP_Rollover = m.and2(m.and2(nLOAD, UP), Rollover)
 
-    # ~LOAD & ~UP & Z  — shared prefix for DOWN-wrap terms
-    nLOAD_nUP_Z = m.and2(m.and2(nLOAD, nUP), Z)
+    # ~LOAD & ~UP & DownWrap  — shared prefix for DOWN-wrap terms
+    nLOAD_nUP_Z = m.and2(m.and2(nLOAD, nUP), DownWrap)
 
     # ~LOAD & Count_enable  — shared prefix for toggle terms
     nLOAD_CE = m.and2(nLOAD, Count_enable)
@@ -199,7 +205,7 @@ def _reference_step(
     elif up:
         nxt = 0 if q_val >= limit_val else q_val + 1
     else:
-        nxt = limit_val if q_val == 0 else q_val - 1
+        nxt = limit_val if (q_val == 0 or q_val > limit_val) else q_val - 1
 
     return [(nxt >> i) & 1 for i in range(bits)]
 
@@ -277,10 +283,11 @@ def run_jkcounter_regression(bits: int = 8, verbose: bool = True) -> bool:
         return [(v >> i) & 1 for i in range(bits)]
 
     scenarios = [
-        ('count-up',   0, 1, max_val),
-        ('count-down', 0, 0, max_val),
-        ('parallel-load', 1, 0, max_val),
-        ('rollover',   0, 1, half),
+        ('count-up',        0, 1, max_val),
+        ('count-down',      0, 0, max_val),
+        ('parallel-load',   1, 0, max_val),
+        ('rollover',        0, 1, half),
+        ('down-out-of-range', 0, 0, half),   # Q starts above LIMIT → snap to LIMIT
     ]
 
     all_ok = True
@@ -289,6 +296,8 @@ def run_jkcounter_regression(bits: int = 8, verbose: bool = True) -> bool:
         # For count-up start at 0, count-down start at limit_val, else random
         if up_fixed and not load_fixed:
             q = [0] * bits
+        elif label == 'down-out-of-range':
+            q = to_bits(max_val)          # start well above LIMIT=half
         elif not up_fixed and not load_fixed:
             q = to_bits(limit_val)
         else:

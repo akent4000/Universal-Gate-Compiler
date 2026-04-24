@@ -9,9 +9,11 @@ commands, mirroring ABC-style scripts, e.g.:
 Commands
 --------
 balance              minimise critical-path depth (area-preserving)
-rewrite  [-z] [-r N] [-K N]
+rewrite  [-z] [-x] [-r N] [-K N]
                      local AIG rewriting via k-feasible cuts
                        -z       use exact (SAT-based) sub-circuit synthesis
+                       -x       enable XAG templates (AND+XOR) from XAG_DB_4;
+                                comparator weighs AND=2 NANDs, XOR=4 NANDs
                        -r N     number of rewriting rounds  (default 1)
                        -K N     cut size                    (default 4)
 refactor [-z] [-r N] [-K N]
@@ -211,6 +213,8 @@ def parse_script(script: str) -> List[Tuple[str, Dict[str, Any]]]:
             tok = tokens[i]
             if tok == '-z' and cmd in ('rewrite', 'refactor', 'bidec'):
                 kwargs['use_exact'] = True
+            elif tok == '-x' and cmd in ('rewrite', 'refactor'):
+                kwargs['use_xag'] = True
             elif tok == '--no-sdc' and cmd == 'dc':
                 kwargs['use_sdc'] = False
             elif tok == '--odc' and cmd == 'dc':
@@ -306,6 +310,8 @@ def _fmt_flags(kwargs: Dict[str, Any]) -> str:
     parts = []
     if kwargs.get('use_exact'):
         parts.append('-z')
+    if kwargs.get('use_xag'):
+        parts.append('-x')
     if kwargs.get('use_sdc') is False:
         parts.append('--no-sdc')
     if kwargs.get('use_odc') is True:
