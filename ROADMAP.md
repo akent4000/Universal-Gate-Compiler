@@ -1,387 +1,232 @@
 # Roadmap
 
-Честный список известных слабостей проекта и путей их исправления, в порядке
-приоритета. Старая версия (распределение задач по моделям Claude) устарела и
-заменена этим документом.
-
-Живой каталог всех pending-задач по фазам остаётся в [TODO.md](TODO.md).
-Этот файл — мета-слой: **что именно сломано / недоделано / оверсолд** и
-**как чинить**.
+Мета-слой над [TODO.md](TODO.md): **что именно нужно сделать дальше** и
+**почему это в таком порядке**. Полные описания завершённых пунктов —
+в [TODO_done.md](TODO_done.md); каталог всех pending-задач по фазам —
+в [TODO.md](TODO.md).
 
 ---
 
-## P0 — Корректность и честность (блокеры доверия)
+## Закрытая база доверия (для истории)
 
-### 1. `dc --odc` не работает на reconvergent-fanout схемах (soundness gap)
+Блокеры "корректность и честность" (P0) и архитектурный долг (P1)
+в основном сняты. Краткая сводка с анкерами, чтобы не ломать внешние
+ссылки из README / тестов / модулей:
 
-**Симптом.** По результатам EPFL-прогона (V2.d) safety-net miter стабильно
-срабатывает на `router` (n_inputs=60), `priority` (128), `i2c` (147),
-`sin` (24). Каждый revert стирает весь проход — на этих схемах
-`dc --odc` даёт 0% выигрыша. Подъём `sim-W` до 16384 не помогает →
-это теоретический зазор в V2 admissibility check, а не coverage.
+| id | что сделано | где смотреть |
+|----|-------------|--------------|
+| **P0#1** | `dc --odc` soundness gap закрыт через `odc_mode='z3-exact'` (priority −21.9%, router/i2c 0 revert'ов); `dc` убран из `DEFAULT_SCRIPT`; stderr-warning на `n_inputs>20` | [dont_care.py](nand_optimizer/synthesis/dont_care.py), [tests/test_dc_odc_soundness.py](tests/test_dc_odc_soundness.py) |
+| **P0#2** | CI + QoR snapshot (pytest-обёртки T1–T13, [qor_baseline.json](benchmarks/qor_baseline.json) +5% толерантность, GitHub Actions py3.11/3.12, EPFL smoke) | [.github/workflows/ci.yml](.github/workflows/ci.yml) |
+| **P1#3** | Плоский пакет разложен по 8 подпакетам (`core/`, `synthesis/`, `mapping/`, `io/`, `sequential/`, `datapath/`, `analysis/`, `testing/`) | [nand_optimizer/](nand_optimizer/) |
+| **P1#4** | `aig_db_4.py` 65k LoC → binary pickle + 35-line lazy loader; `xag_db_4.pkl` добавлен | [aig_db_4.py](nand_optimizer/aig_db_4.py), [xag_db_4.py](nand_optimizer/xag_db_4.py) |
+| **P1#5 (ч.1)** | cProfile baseline + bit-mask `Implicant` → `mult4` 15.8s → 6.9s (**2.3×**), QMC `can_combine` 4.9× | [benchmarks/perf_baseline.md](benchmarks/perf_baseline.md), [core/implicant.py](nand_optimizer/core/implicant.py) |
+| **P2#7** | Pass QoR evaluation harness + [pass_eval.md](benchmarks/pass_eval.md): XAG −4.3%, bandit −15.4%, bdd/resub → experimental | [benchmarks/run_pass_eval.py](benchmarks/run_pass_eval.py) |
+| **P3#8 (Phase 1–5)** | XAG (нативный XOR-узел во всех проходах) + `XAG_DB_4` (87% из 65 536 TT дешевле) + NAND-cost-aware comparator (`rewrite -x`): adder −24.7%, router −17.2%, sin −5.1%, 0 регрессий на 11 EPFL | [core/aig.py](nand_optimizer/core/aig.py), [synthesis/rewrite.py](nand_optimizer/synthesis/rewrite.py) |
+| **P3#10** | SAT sweeping (ODC-aware FRAIG superset) — proc `sweep`, symbolic obs-builder + Z3 миттер, на 11 EPFL: adder −6.4%, i2c −0.8%, sin −0.1%, 8 ties, 0 регрессий; complementary к `dc --odc --odc-mode z3-exact` | [synthesis/sat_sweep.py](nand_optimizer/synthesis/sat_sweep.py), [tests/test_sat_sweep.py](tests/test_sat_sweep.py), [pass_eval.md §5](benchmarks/pass_eval.md) |
 
-**Видимость для пользователя сейчас.** Шаги 1–2 выполнены: дефолтный скрипт
-теперь `"rewrite; fraig; rewrite; balance"` (без `dc`), а `dc --odc` на AIG
-с `n_inputs > 20` печатает явный warning в stderr. Пользователь, запускающий
-умолчания, больше не получает silent no-op; явный вызов `dc` остаётся
-доступен через `--script`.
-
-**Путь исправления (в порядке возрастания стоимости):**
-1. ✅ **Выполнено:** `dc` убран из `DEFAULT_SCRIPT`
-   ([nand_optimizer/script.py](nand_optimizer/script.py)); остался
-   `"rewrite; fraig; rewrite; balance"`. Флаг `--script "... dc ..."`
-   продолжает работать явно.
-2. ✅ **Выполнено:** `dc_optimize()` с `use_odc=True` и `n_inputs > 20`
-   печатает в stderr `WARN: dc --odc has known soundness gap on
-   reconvergent-fanout circuits (n_inputs=... > 20); see ROADMAP.md P0#1.`
-   ровно один раз за вызов (см. `_ODC_WARN_DEPTH` в
-   [nand_optimizer/dont_care.py](nand_optimizer/dont_care.py)).
-3. ✅ **Выполнено:** minimal revert cone извлечён из `router`
-   (outport[1]) через delta-debug с constant-substitution внутренних AND-узлов:
-   [tests/fixtures/router_outport1_minimal.aig](tests/fixtures/router_outport1_minimal.aig)
-   — **14 ANDs / 15 inputs / 1 output** (29 node ids). Revert
-   воспроизводится при W ∈ {128, 1024, 16384}, а `dc` без `--odc` на
-   том же входе работает корректно. Regression-тест:
-   [tests/test_dc_odc_soundness.py](tests/test_dc_odc_soundness.py)
-   (3 инварианта + «фикстура обязана ревертить» как live-сигнал, что
-   фикс ещё не landed).
-4. ✅ **Выполнено (V3 — z3-exact admissibility):** Корень проблемы —
-   not care underestimation, but **admissibility coverage**: при 2^60 PI
-   паттернов sim-based check (W=128) пропускает плохие шаблоны. Реализован
-   `odc_mode='z3-exact'` в [dont_care.py](nand_optimizer/dont_care.py) —
-   для каждого template и каждой resub-операции выполняется точная Z3-проверка
-   `UNSAT(ODC_v AND T(cut_old) ≠ old_v)`, где `ODC_v` вычисляется через
-   `z3.substitute` (кэшируется на узел — O(n_nodes × n_POs × substitute_cost)
-   один раз, потом O(SAT) per check). Результаты:
-
-   | benchmark | n_ands | no-odc | z3-exact | reverts |
-   |-----------|--------|--------|----------|---------|
-   | router    | 257    | -3.5%  | -2.3%    | 0 ✓    |
-   | priority  | 978    | -8.0%  | **-21.9%** | 0 ✓  |
-   | i2c       | 1342   | -2.2%  | -0.1%    | 0 ✓    |
-   | sin       | 5416   | TBD    | TBD      | TBD    |
-
-   Скорость: 4–27s на benchmark против 0.2–2.3s legacy (10–15× overhead
-   из-за Z3 per-template). Флаги: `dc --odc --odc-mode z3-exact`.
-   Regression: [tests/test_dc_odc_soundness.py](tests/test_dc_odc_soundness.py)
-   (test_z3_exact_no_revert, test_z3_exact_circuit_equivalence).
-5. ✅ **Выполнено (V3 — window-local ODC):** `odc_mode='window'` реализует
-   forward-flip per-node симуляцию в K-уровневом fanout-окне
-   ([dont_care.py: _propagate_care_sim_window](nand_optimizer/dont_care.py)).
-   Работает на фикстуре (depth=1: reverts=0 при исчерпывающем W=32768), но
-   на полных EPFL-схемах (60-147 PI) сохраняет reverts из-за coverage-проблемы
-   admissibility check. Полезен для малых схем как более консервативная
-   альтернатива; флаги: `dc --odc --odc-mode window --window-depth K`.
-
-**Статус (шаги 1–5 выполнены):** `dc --odc --odc-mode z3-exact` даёт:
-
-| bench    | legacy rev | z3-exact rev | z3-exact area | z3-exact time |
-|----------|-----------|--------------|---------------|---------------|
-| router   | 1         | **0** ✓     | -2.3%         | 4.5s          |
-| priority | 1         | **0** ✓     | **-21.9%** ✓  | 26s           |
-| i2c      | 1         | **0** ✓     | -0.1%         | 27s           |
-| sin      | 1         | 1 (>3000 ANDs → legacy fallback) | 0% | 58s |
-
-Criterion ≥5% выполнен на priority (-21.9% vs baseline -8%). router и i2c
-дают скромный выигрыш; sin (5416 ANDs) превышает threshold n_ands≤3000 и
-автоматически падает в legacy. Для production нужен дальнейший speed-up
-(параллельный SAT, incremental formulas, lazy evaluation).
+Все детали — в [TODO_done.md](TODO_done.md).
 
 ---
 
-### 2. Нет CI и регрессионного snapshot-тестирования ✅ ВЫПОЛНЕНО
+## P1 — Оставшийся перф-долг (опционально)
 
-**Симптом.** 13.7k LoC, 41 модуль, 0 автоматических gate'ов. T1–T10 запускаются
-только внутри `optimize()` по явному вызову. `proptest` и EPFL CEC — ручные.
-При таком количестве проходов регрессия при любой правке почти гарантирована.
+### P1#5 (ч.2) — Дальнейшая оптимизация Python
 
-**Что сделано:**
-1. ✅ **Pytest-обёртки для T1–T13:**
-   [tests/test_builtin_circuits.py](tests/test_builtin_circuits.py) прогоняет
-   `7seg / adder / excess3` через универсальный harness `run_tests()` (T1–T13:
-   QMC, phase assign, factorize, Shannon, inversion elim, coverage, NAND sim,
-   don't-care robustness, full cross-check, greedy reassoc, Ashenhurst-Curtis,
-   exact synth, rewrite equivalence). MCNC-набор (`rd53, parity9, mult3, mult4,
-   misex1, z4ml`) в [tests/test_mcnc_benchmarks.py](tests/test_mcnc_benchmarks.py)
-   использует `miter_verify` (Z3 UNSAT или exhaustive fallback) — Z3 быстрее
-   T1–T13 на больших схемах.
-2. ✅ **QoR snapshot.** [benchmarks/qor_baseline.json](benchmarks/qor_baseline.json)
-   содержит эталонные NAND counts для всех 9 схем (мера на дефолтном скрипте
-   `rewrite; fraig; rewrite; balance`); толерантность +5%. Тест
-   [tests/test_qor_snapshot.py](tests/test_qor_snapshot.py) падает при превышении.
-   Базовые значения: `7seg:40, adder:23, excess3:15, rd53:40, parity9:43, mult3:74,
-   misex1:56, z4ml:42, mult4:414`. Негативный тест (искусственная регрессия
-   `mult3=40` → фактически 74) сработал с корректным diagnostic message.
-   Обновлять baseline после намеренного улучшения:
-   `python3 tests/_refresh_qor_baseline.py`.
-3. ✅ **Property-based smoke.** [tests/test_property.py](tests/test_property.py) —
-   20 случайных TT через `run_property_tests(seed=0xC0FFEE)`; Hypothesis-стратегии
-   подхватываются pytest автоматически если установлен `hypothesis`.
-4. ✅ **GitHub Actions.** [.github/workflows/ci.yml](.github/workflows/ci.yml) —
-   matrix py3.9/3.11, steps: (a) прогрев NPN-БД; (b) `pytest -v --tb=short`
-   (25 тестов включая `test_dc_odc_soundness.py`); (c) `proptest --cases 50`;
-   (d) EPFL smoke (`arithmetic/adder,random_control/ctrl --no-verify`).
-   Локальный прогон: 25/25 passed за 46 s.
+Шаги 1-2 дали заявленное `mult4 < 50% исходного wall-time`. Не блокирует
+P2/P3, но всё ещё есть два дешёвых выигрыша:
 
-**Статус:** PR, ломающий QoR на `mult3` больше чем на 5%, теперь блокируется CI
-с сообщением
-`QoR regression on 'mult3': 74 NAND vs baseline 40 (cap 42 at +5%). If this is intentional, rerun tests/_refresh_qor_baseline.py.`
+1. **Мемоизация QMC в Ashenhurst bake-off.** На `mult4` `quine_mccluskey`
+   вызывается 4698 раз — раз на каждый bipartition probe. Хэш по
+   cube-cover tuple либо prune bipartition search до ре-синтеза.
+   Потенциал: ещё **~2×** на синтезной части.
+2. **Второй профиль** на EPFL `sin` (5416 ANDs) для оценки FRAIG.
+   На `mult4` FRAIG <1% — numpy-FRAIG не окупается; нужны данные с
+   действительно FRAIG-heavy схемы, прежде чем вкладываться.
 
----
-
-## P1 — Архитектурный долг
-
-### 3. Плоский пакет из 41 файла
-
-**Симптом.** Навигация между слоями (I/O, synthesis passes, sequential,
-testing) требует знать все имена модулей. `CLAUDE.md` вынужден держать
-таблицу «какой модуль за что отвечает» именно потому, что иерархии нет.
-
-**Путь исправления.** Выполнить Phase 6 из [TODO.md](TODO.md#L108) одним
-механическим коммитом:
-- `nand_optimizer/core/` — `aig.py, expr.py, truth_table.py, implicant.py`
-- `nand_optimizer/synthesis/` — `rewrite.py, fraig.py, balance.py, decomposition.py, dont_care.py, exact_synthesis.py, optimize.py, bidec.py, bdd_decomp.py, sat_resub.py`
-- `nand_optimizer/mapping/` — `nand.py, circ_export.py`
-- `nand_optimizer/io/` — `aiger_io.py, blif_io.py, verilog_io.py, dot_export.py`
-- `nand_optimizer/sequential/` — `fsm.py`
-- `nand_optimizer/datapath/` — `structural.py, datapath.py`
-- `nand_optimizer/analysis/` — `sta.py, switching.py, atpg.py`
-- `nand_optimizer/testing/` — `tests.py, property_tests.py, benchmark_runner.py, epfl_bench.py, profile.py`
-- оркестраторы наверху: `pipeline.py, script.py, verify.py, __init__.py, __main__.py`
-
-**Риск:** bootstrap `precompute_4cut.py` использует env-guard
-(`_NAND_OPTIMIZER_BOOTSTRAPPING=1`) и subprocess — после переезда нужно
-проверить, что guard всё ещё ловит все пути импорта.
-
-**Готово, когда:** все `from nand_optimizer import ...` работают, `python -m
-nand_optimizer` не тормозит на bootstrap, CLAUDE.md обновлён.
-
----
-
-### 4. `aig_db_4.py` — 65k-строчный Python-файл как хранилище данных ✅
-
-**Решение.** `precompute_4cut.py` теперь сериализует БД в
-`aig_db_4.pkl` (binary pickle, ~3.6 МБ vs 5.5 МБ Python-текста).
-`aig_db_4.py` превращён в тонкий (~35 строк) lazy-loader: модуль-уровневый
-`__getattr__` вызывает `pickle.load` при первом обращении к `AIG_DB_4`,
-потом кеширует. Все старые `from ..aig_db_4 import AIG_DB_4` в rewrite.py,
-dont_care.py, bidec.py, sat_resub.py работают без изменений. `.gitignore`
-игнорирует `.pkl`; bootstrap в `__init__.py` пересобирает pickle через
-subprocess `python -m nand_optimizer.precompute_4cut`, если файла нет.
-
-**Результат.** `wc -l nand_optimizer/aig_db_4.py` = 35 (было 65539).
-25/25 pytest-тестов проходят, 8-bit JK-counter регрессия (256 шагов) ок.
-
----
-
-### 5. Python-перформанс не измерен
-
-**Симптом.** Заявлено «для 20+ входов BDD / GPU» в Phase 4/4.5, но нет
-базового cProfile-отчёта по текущему коду. Скорее всего есть «свободные»
-ускорения через numpy, которые не сделаны.
-
-**Путь исправления.**
-1. ✅ **Profile baseline:** cProfile-дамп + top-10 hotspots зафиксированы в
-   [benchmarks/perf_baseline.md](benchmarks/perf_baseline.md).
-   Baseline wall-clock: **15.8 s** для
-   `python -m nand_optimizer mult4 --quiet --script "rewrite; fraig; rewrite; balance"`.
-   Ключевой findings: доминирует не FRAIG, а Quine-McCluskey — `can_combine`
-   + `subsumes` + `combine` = 17.7 s / 36 s (~50% профиля), QMC cumtime
-   22.9 s (64%). FRAIG cumtime = 0.17 s (<1%). Исходная гипотеза из п.2
-   («numpy-FRAIG даст 5–20×») на `mult4` не подтверждается.
-2. ✅ **Оптимизация `Implicant` (core/implicant.py).**
-   [nand_optimizer/core/implicant.py](nand_optimizer/core/implicant.py)
-   хранит теперь `_care`/`_value` bit-masks рядом с `bits`-tuple (tuple
-   сохранён для внешних потребителей — `mapping/nand.py`, hashing). Хот-тройка
-   стала:
-   - `can_combine`: `self._care == other._care and (self._value ^ other._value).bit_count() == 1`
-   - `subsumes` (+ `subsumes_masks` fast-path): `(self._care & ~cube_care) == 0 and ((self._value ^ cube_value) & self._care) == 0`
-   - `combine`: `new_care = self._care & ~(self._value ^ other._value); new_value = self._value & new_care`
-
-   `select_cover` / `_select_cover_shared` предварительно вычисляют
-   `(care, value)` маски для каждого `on_cube` один раз и вызывают
-   `subsumes_masks`. `quine_mccluskey` группирует по `imp._value.bit_count()`.
-
-   Результаты (см. [benchmarks/perf_baseline.md](benchmarks/perf_baseline.md)):
-   - **wall-clock mult4: 15.8 s → 6.9 s (2.3× speedup, цель <7.9 s met)**.
-   - `can_combine` self-time: 13.26 s → 2.71 s (4.9×).
-   - `subsumes` выпал из top-10 целиком (было 1.86 s).
-   - QMC cumulative: 22.9 s → 12.0 s (1.9×).
-   - 25/25 pytest проходят, QoR baseline (mult4: 414 NAND) неизменён.
-3. **Декомпозиция bake-off переиспользует QMC результаты.**
-   `quine_mccluskey` вызывается 4 698 раз на одной `mult4` — раз на каждую
-   bipartition probe в Ashenhurst-поиске. Добавить memoization по cube-cover
-   tuple либо prune bipartition search до ре-синтеза. Потенциал: ещё ~2× на
-   синтезной части.
-4. **Numpy-FRAIG — только после второго профиля.** На `mult4` FRAIG 0.17 s
-   (<1%); прежде чем вкладываться, снять профиль на схеме с нетривиальным
-   FRAIG (например EPFL `arithmetic/sin`, 5 416 ANDs). Если и там FRAIG <5%
-   — выкинуть этот шаг.
-5. **Только если (3)+(4) недостаточно:** рассмотреть Cython для AIG
-   structural-hash lookup (`aig.node_of`, `aig.get_and`).
-
-**Статус:** шаги 1–2 выполнены, цель P1#5 (`mult4` < 50% исходного
-wall-time) достигнута; шаги 3–5 остаются как дальнейшие оптимизации,
-не блокирующие P2/P3.
+Шаг 3 (Cython) оставлен как resort — только если шаги 1-2 окажутся
+недостаточны.
 
 ---
 
 ## P2 — Depth-over-breadth
 
-### 6. Verilog front-end заявлен, но subset не задокументирован
+### P2#6 — Verilog front-end: subset не задокументирован
 
-**Симптом.** 843 LoC нативного парсера — наверняка работает на узком
-подмножестве, но внешне выглядит как «Verilog support».
+**Симптом.** [verilog_io.py](nand_optimizer/io/verilog_io.py) 843 LoC
+нативного парсера, но извне выглядит как "Verilog support" без уточнений.
 
-**Путь исправления.**
-1. В docstring [verilog_io.py](nand_optimizer/verilog_io.py) зафиксировать
-   **явную грамматику subset**'а: какие конструкции парсер принимает, какие
-   даёт явную ошибку. Что-то вроде:
-   ```
-   Supported:
-     - module / endmodule, input, output, wire, assign
-     - Primitives: and, or, nand, nor, xor, xnor, not, buf
-     - Behavioural: always @(*) with if/else, case
-   Not supported:
-     - parameter, generate, for/while, task/function
-     - Sequential always @(posedge clk) — use FSM front-end instead
-     - $-functions, `-directives beyond simple `define
-   ```
-2. **Корпус тестов:** 10 файлов в `tests/verilog/` с expected
-   pass/fail-диагностиками.
-3. **Decision point** (в ROADMAP не решаем): либо инвестировать до ~80%
-   покрытия реальных netlist'ов, либо deprecate и делегировать yosys→BLIF.
+**Путь исправления:**
+1. Docstring-грамматика subset'а (supported / not supported конструкции).
+2. Корпус тестов `tests/verilog/` (10 файлов с expected pass/fail).
+3. **Decision point:** инвестировать до ~80% покрытия real-world netlist'ов
+   ИЛИ пометить deprecated и делегировать yosys→BLIF. Не решаем в
+   ROADMAP — нужен сигнал от пользователей.
 
-**Готово, когда:** пользователь, подающий unsupported-конструкцию, получает
-конкретную ошибку `unsupported construct 'generate' at line N`, а не
-silent-miscompile.
+**Готово, когда:** неподдерживаемая конструкция даёт явную ошибку
+`unsupported construct 'generate' at line N`, а не silent-miscompile.
 
 ---
 
-### 7. Bandit / auto-compose / BDD-rebuild / SAT-resub — QoR не измерены ✅
+## P3 — Реальные unlock'и по минимизации
 
-**Решение.** [`benchmarks/pass_eval.md`](benchmarks/pass_eval.md) содержит
-полные результаты для 4 проходов на EPFL subset (harness:
-[`benchmarks/run_pass_eval.py`](benchmarks/run_pass_eval.py)):
+Ранжированы по ожидаемому выигрышу `Δarea / LOC-effort`. Первые три
+пункта — **практически готовые к старту**; 4-5 — research-tier.
 
-| pass            | subset | mean Δarea  | mean Δtime    | wins/ties/regs | verdict |
-|-----------------|--------|------------:|--------------:|---------------:|---------|
-| `XAG (-x)`      | 11     | **−4.3%**   | +2.0%         | 3/8/0          | production-ready opt-in (см. P3#8 Phase 5) |
-| `bandit (h=20)` | 7      | **−15.4%**  | +3 966.2%     | 5/2/0          | best QoR, batch exploration mode |
-| `+bdd`          | 7      | +0.8%       | +49.7%        | 0/5/2          | **experimental** — нет area-выигрыша |
-| `+resub`        | 3      | −6.1%       | +46 056.6%    | 2/0/1          | **experimental** — wall-time prohibitive |
+### P3#8 — Phase 6: XOR-extractor-aware MFFC cost
 
-В README/`script.py` помечены `bdd` и `resub` как experimental с явной
-ссылкой на pass_eval.md. `bandit` описан как high-effort mode с EPFL-цифрами.
-`auto-compose` остаётся вне eval'а (PLA-only CLI helper, не script command).
+**Почему сейчас.** Фазы 1-5 XAG дают −24.7% на adder и −17.2% на router,
+но `use_xag=False` остаётся по умолчанию из-за единственной регрессии на
+cube-cover built-in: `rd53` 40 → 45 NAND (+12%). Корень известен
+([pass_eval.md:58-69](benchmarks/pass_eval.md)): локальная cost-модель
+rewriter'а (AND=2 NAND) не знает, что post-mapping XOR-extractor в
+[mapping/nand.py](nand_optimizer/mapping/nand.py) уже сжимает 3-AND
+XOR-кластеры в 4-NAND. Поэтому rewriter "крадёт" 3 AND стоимостью 6 NAND
+под native XOR (4 NAND), разрушая шэринг ниже по цепочке.
 
----
+**Что сделать.** Пометить AND-узлы, участвующие в 3-AND XOR/XNOR паттерне,
+как имеющие эффективную cost=4/3 вместо 2. Ограничение применять при
+вычислении MFFC-cost в [`synthesis/rewrite.py`](nand_optimizer/synthesis/rewrite.py).
+Достаточно статического pass'а "найти паттерны ANDs, которые XOR-extractor
+свернёт", с кэшем на AIG.
 
-## P3 — Следующий реальный unlock
+**Готово, когда.** `use_xag=True` дефолт, `rd53` и остальные cube-cover
+built-in T1–T13 не регрессируют, EPFL-выигрыши сохраняются.
 
-### 8. ~~XAG (XOR-AND Graph) как основное расширение AIG~~ ✅ ВЫПОЛНЕНО (Phase 1–4)
-
-**Решение.** XOR поднят из «3-AND expansion, детектируемый на этапе маппинга» до
-полноправного графового примитива по всему пайплайну.
-
-**Что сделано:**
-
-1. **Core (AIG→XAG):** в [core/aig.py](nand_optimizer/core/aig.py) добавлен
-   словарь `_xhash`, нативный `make_xor(a, b)` с константной пропагацией и
-   structural hashing, accessors `has_xor()` / `get_xor()`, свойство `n_xors`.
-   `gc()`, `compose()`, `snapshot()` / `restore()` обрабатывают `('xor', a, b)`
-   записи наравне с `('and', a, b)`.
-2. **Expr:** добавлен класс `Xor(a, b)` в [core/expr.py](nand_optimizer/core/expr.py);
-   `simp()` распространяет константы через XOR (`x^0=x`, `x^1=~x`, `x^x=0`).
-3. **Mapping:** `expr_to_aig()` эмитит `aig.make_xor()` для `Xor`-узлов вместо
-   3 AND; `aig_to_gates()` эмитит канонический 4-NAND XOR (pos_lit = XOR output;
-   neg_lit = XNOR с доп. инвертором); `_compute_needed_lits()` и блоки
-   re-expand в шагах 3/4 обрабатывают `('xor', …)` записи.
-4. **Synthesis passes:** все проходы (`rewrite`, `fraig`, `balance`, `dont_care`,
-   `sat_resub`, `bdd_decomp`, `bidec`) знают про `('xor', …)`-узлы. Care
-   propagation: XOR всегда чувствителен к обоим входам (`care[a] |= care[y]`).
-5. **XAG_DB_4:** новые файлы [precompute_xag_db.py](nand_optimizer/precompute_xag_db.py)
-   + [xag_db_4.py](nand_optimizer/xag_db_4.py) — BFS по всем 4-входовым
-   функциям с AND и XOR на каждом уровне стоимости. Формат шаблонов:
-   `(a_lit, b_lit, op_kind)` где `op_kind ∈ {0=AND, 1=XOR}`. Результаты:
-   **87% из 65 536 truth tables дешевле в XAG** (57 382 cheaper, 8 154 same);
-   средняя глубина шаблона: 7.76 → 5.21 ops; max 15 → 7. Опция `use_xag=True`
-   в `rewrite_aig()` — по умолчанию выключена до реализации NAND-cost-aware
-   компаратора шаблонов (текущий сравнивает по `len(ops)`, что не учитывает
-   4-NAND стоимость XOR-узлов).
-6. **I/O:** AIGER writer (`io/aiger_io.py`) раскрывает XOR→3 AND перед записью
-   (формат поддерживает только AND); DOT export (`io/dot_export.py`) рисует
-   XOR оранжевым ромбом с `⊕` меткой.
-
-**Регрессия:** 25/25 pytest-тестов проходят, все built-in схемы (7seg 62/62,
-adder 41/41, excess3, rd53 и др.) проходят T1–T13, QoR baseline не нарушен.
-
-**Phase 5 (NAND-cost-aware comparator):** ✅ **выполнено.**
-[`synthesis/rewrite.py:rewrite_aig`](nand_optimizer/synthesis/rewrite.py)
-теперь оценивает кандидатов взвешенно: новые узлы шаблона `n_new_and·2 +
-n_new_xor·4` против MFFC `Σ(2 if AND else 4)`. AIG_DB_4 и XAG_DB_4
-сравниваются между собой по этой метрике (старая селекция «по `len(ops)`»
-удалена). Флаг `-x` пробрашен в команду `rewrite`. EPFL результаты
-(см. [pass_eval.md](benchmarks/pass_eval.md)): adder −24.7%, router −17.2%,
-sin −5.1%, **0 регрессий на 11 EPFL** circuits. Mean Δarea = −4.3%, mean
-Δtime = +2.0%.
-
-**Почему default остаётся `use_xag=False`:** на cube-cover built-in `rd53`
-регрессия 40 → 45 NAND (+12%). Корень — interaction с post-mapping
-XOR-extractor в [`mapping/nand.py`](nand_optimizer/mapping/nand.py),
-который уже сжимает 3-AND XOR-кластеры в 4-NAND форму. Локальная модель
-rewriter'а оценивает 3 ANDa в 6 NAND и предпочитает native XOR (4 NAND),
-что блокирует FRAIG-шэринг ниже по цепочке. EPFL стартует с AIGER (без
-Espresso), поэтому регрессия там не проявляется. Включить по умолчанию
-можно только после XOR-extractor-aware MFFC cost (тегировать AND-узлы,
-участвующие в потенциальном 3-AND XOR pattern, как cost=4/3 вместо 2).
-
-**Оставшееся (Phase 6+, опционально):**
-- XOR-extractor-aware MFFC cost (см. выше) — разблокирует
-  `use_xag=True` по умолчанию.
-- XOR-aware Don't-Care reasoning (самодуальность XOR).
-- BLIF/Verilog writers, эмитящие XOR-операторы напрямую.
+**Бонус-пункт одной строкой:** добавить `'rewrite -x'` в
+[`script.py:DEFAULT_ARMS`](nand_optimizer/script.py) — bandit
+в EPFL-эвале сейчас оставляет adder −24.7% на столе
+([pass_eval.md §4](benchmarks/pass_eval.md)).
 
 ---
 
-### 9. MIG, GPU, ML — только после P0–P3
+### P3#9 — Structural choice nodes (ABC `compress2rs`-style)
 
-**Обоснование.** MIG (Phase 2.7), GPU-проходы (Phase 4.5), ML-guided
-synthesis (Phase 8) — исследовательские направления. Браться за них имеет
-смысл только когда:
-- QoR baseline измерен и стабилен (пункт 8);
-- нет известных soundness-дыр (пункт 1);
-- есть CI, ловящий регрессии (пункт 2);
-- перформанс baseline не упирается в очевидные python-потери (пункт 6).
+**Крупнейший неисследованный алгоритмический рычаг** в пайплайне.
 
-До тех пор эти фазы в [TODO.md](TODO.md) остаются как research backlog,
-но не должны приоритезироваться.
+**Источник.** Mishchenko, Chatterjee, Brayton — "DAG-aware AIG rewriting"
+(DAC 2006) и "Integrating Logic Synthesis, Technology Mapping, and
+Retiming" (ICCAD 2006). ABC-скрипт `compress2rs` — это эталон, с которым
+сравнивается любой индустриальный synthesis flow.
+
+**Симптом / мотивация.** Текущий дефолт `rewrite; fraig; rewrite; balance` —
+последовательно разрушающие проходы: каждый уничтожает структуру
+предыдущего. Global bandit с h=20 даёт −15.4% именно потому, что ищет
+"удачную" последовательность — но это brute-force обход фундаментальной
+проблемы local destructive rewrite.
+
+**Что сделать.** Для каждой функции хранить *несколько* альтернативных
+AIG-реализаций, полученных разными проходами (snapshot'ы после baseline
+/ balanced / rewritten / fraig), связанных через equivalence chain
+(`choice_next: node_id → node_id`). На этапе cut-matching rewriter и
+mapper выбирают лучшую альтернативу *per cut*, а не per global pass.
+
+**Почему реалистично.** У вас уже есть:
+- `AIG.snapshot()` / `restore()` — готовая инфраструктура для альтернатив.
+- FRAIG equivalence-классы — готовый механизм пометки "эти два узла
+  функционально равны".
+- K-feasible cut enumeration в rewriter'е — готовый потребитель выбора.
+
+**Оценка.** ~300-500 LOC в [core/aig.py](nand_optimizer/core/aig.py)
+(поле `choice_next`, accessors, GC-safety) + новый proc `choice` в
+[script.py](nand_optimizer/script.py) + расширение
+cut-matching в [synthesis/rewrite.py](nand_optimizer/synthesis/rewrite.py).
+Литературный ожидаемый выигрыш: **+10-25% поверх single-pass rewrite**
+на индустриальных схемах.
+
+**Готово, когда.** На EPFL subset (11 схем): mean Δarea лучше
+`bandit (h=20)` при сопоставимом или меньшем wall-time.
+
+---
+
+### P3#11 — SPFD-based don't-cares
+
+**Источник.** Yamashita, Sawada, Nagoya (ICCAD 1996); Mishchenko &
+Brayton follow-ups. Sets of Pairs of Functions to be Distinguished —
+**строго мощнее SDC+ODC**: не требует сохранения функции узла, а лишь
+различения тех же пар входов, которые узел различает в текущей схеме.
+
+**Мотивация.** `dc --odc --odc-mode z3-exact` уже даёт priority −21.9%
+(P0#1), но на `sin` (5416 ANDs) не срабатывает — превышает
+`n_ands≤3000` threshold и падает в legacy. SPFD по идее даёт +5-15% на
+схемах, где ODC уже работает, плюс открывает тe схемы, где z3-exact
+упирается в compute.
+
+**Что сделать.** Либо BDD-бэкенд через `dd` (уже в зависимостях через
+[synthesis/bdd_decomp.py](nand_optimizer/synthesis/bdd_decomp.py)), либо
+аккуратная SAT-реализация по аналогии с z3-exact ODC. Новый
+`odc_mode='spfd'` во флагах `dc`.
+
+**Риск.** SPFD теоретически тяжелее ODC; если на практике получается
+≥10× оверхед, оставить experimental.
+
+---
+
+### P3#12 — SAT-resub speed-up
+
+`resub` уже даёт mean Δarea −6.1% (adder −12.4%, ctrl −6.6%), но 460×
+медленнее baseline — запрещено включать в default
+([pass_eval.md §3](benchmarks/pass_eval.md)).
+
+**Три дешёвых хода:**
+1. Incremental solver через `z3.Solver().push()/pop()` вместо
+   пересоздания контекста на каждый cut.
+2. Переиспользование learnt clauses между соседними cut'ами одного узла.
+3. Sim-based фильтрация divisor-pool *перед* SAT — отбрасывать пары,
+   чьи симуляционные сигнатуры не могут функционально покрыть cut.
+
+**Цель.** 10-30× speedup; после этого resub входит в default с −5-10%
+mean area.
+
+---
+
+### P3#13 — MIG, GPU, ML — research backlog
+
+Браться только когда P3#8 (Phase 6) и P3#9 (choice nodes) landed
+(P3#10 уже закрыт). До тех пор — в [TODO.md](TODO.md#фаза-47-gpu-ускорение)
+как research-рельсы:
+
+- **MIG (Majority-Inverter Graph)** — альтернативный primitive для
+  арифметики. Реалистичный выигрыш: +10-20% на `max` / `bar` EPFL-схемах,
+  которые в XAG-фазе не сдвинулись. Стоимость — недели (parallel AIG-style
+  infra).
+- **GPU-FRAIG / GPU-rewrite** ([TODO.md Фаза 4.5](TODO.md)) — трогать
+  только после повторного профиля на FRAIG-heavy схеме.
+- **ML-guided synthesis** ([TODO.md Фаза 8](TODO.md)) — RL script-control,
+  GNN cut ranking, learned FRAIG signatures. Требует накопленного корпуса
+  логов синтеза и QoR-датасета.
 
 ---
 
 ## Порядок исполнения
 
 ```
-P0#1 (dc out of default)   ✅ ──┐
-P0#2 (CI + QoR snapshot)   ✅ ──┘ база доверия
-         │
-         ▼
-P1#3 (package layout)      ✅
-P1#4 (aig_db as .pkl)      ✅
-P1#5 (numpy FRAIG)
-         │
-         ▼
-P2#6 (Verilog subset spec)
-P2#7 (pass QoR eval)       ✅
-         │
-         ▼
-P3#8 (XAG)                 ✅ (Phase 1–5 done, Phase 6+ optional)
-         │
-         ▼
-P3#9 (MIG / GPU / ML — по готовности)
+✅ P0#1 (dc soundness)        ──┐
+✅ P0#2 (CI + QoR snapshot)    ──┤ база доверия закрыта
+✅ P1#3 (package layout)       ──┤
+✅ P1#4 (aig_db as .pkl)       ──┤
+✅ P1#5 ч.1 (QMC bitmask)      ──┤
+✅ P2#7 (pass QoR eval)        ──┤
+✅ P3#8 Phase 1-5 (XAG)        ──┤
+✅ P3#10 (SAT sweeping)        ──┘
+                │
+                ▼
+         P3#8 Phase 6 (XOR-aware MFFC)  ← next, дни работы
+                │
+                ▼
+         P3#9 Structural choice nodes    ← самый крупный unlock
+                │
+                ▼
+         P3#11 SPFD DC   +   P3#12 SAT-resub speedup
+                │
+                ▼
+         P3#13 MIG / GPU / ML (research backlog)
+
+Параллельно, не блокирует:
+   P1#5 ч.2 (QMC memoization)
+   P2#6 (Verilog subset spec или deprecate)
 ```
 
-Раздел README «Limitations» уже добавлен (см. [README.md](README.md)) —
-пользователь сразу видит ограничения. P0#1 и P0#2 закрыли доверительную базу:
-`dc --odc --odc-mode z3-exact` устраняет revert'ы на reconvergent-fanout,
-а CI + QoR snapshot блокирует PR-ы с регрессией > 5%.
+Раздел README «Limitations» уже отражает текущие ограничения.
+P0#1 и P0#2 закрыли доверительную базу: `dc --odc --odc-mode z3-exact`
+устраняет revert'ы на reconvergent-fanout, а CI + QoR snapshot блокирует
+PR-ы с регрессией > 5%.

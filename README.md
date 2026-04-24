@@ -240,6 +240,7 @@ python -m nand_optimizer epfl --subset arithmetic/adder --script "rewrite -x; fr
 | `bidec`    | Disjoint-support bi-decomposition `f = g(X) op h(Y)` for AND/OR/XOR (k=5..8 cuts) |
 | `bdd`      | Per-output ROBDD rebuild + sifting reorder + ITE realisation (requires `dd`) — **experimental** (no measurable area win on EPFL subset; mean Δarea +0.8%, see [pass_eval.md](benchmarks/pass_eval.md)) |
 | `resub`    | SAT-style functional resubstitution with up to 3 divisors for wide cuts (k=5..7) — **experimental** (mean Δarea −6.1% on small circuits but ~460× wall-time; see [pass_eval.md](benchmarks/pass_eval.md)) |
+| `sweep`    | SAT sweeping — ODC-aware FRAIG superset; merges nodes equivalent modulo observability via symbolic obs-builder + Z3 miter (Mishchenko 2009 §3). Beats FRAIG on adder (−6.4%), 0 regressions on 11 EPFL; ~3× wall-time (see [pass_eval.md §5](benchmarks/pass_eval.md)) |
 
 ### Flags for `rewrite` / `refactor`
 
@@ -278,6 +279,9 @@ python -m nand_optimizer epfl --subset arithmetic/adder --script "rewrite -x; fr
 | `resub` | `-M N`          | Max divisors in dependency test | 3 |
 | `resub` | `-D N`          | Divisor pool cap | 20 |
 | `resub` | `-r N`          | Rounds | 1 |
+| `sweep` | `-D N`          | Simulation word width (patterns) | 256 |
+| `sweep` | `-r N`          | Rounds | 2 |
+| `sweep` | `-T N`          | Z3 timeout per pair, ms | 2000 |
 
 ### Python API
 

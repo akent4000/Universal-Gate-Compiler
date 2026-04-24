@@ -59,6 +59,11 @@ resub [-K N] [-k N] [-M N] [-D N] [-r N]
                        -M N   max divisors m    (default 3)
                        -D N   divisor pool cap  (default 20)
                        -r N   rounds            (default 1)
+sweep [-D N] [-r N] [-T N]
+                     SAT sweep: ODC-aware equivalence merging (superset of fraig)
+                       -D N   simulation word width, patterns (default 256)
+                       -r N   rounds                          (default 2)
+                       -T N   Z3 timeout per pair, ms         (default 2000)
 
 Bandit-guided search
 --------------------
@@ -88,6 +93,7 @@ DEFAULT_ARMS: List[str] = [
     'rewrite',
     'rewrite -z',
     'fraig',
+    'sweep',
     'dc',
 ]
 
@@ -201,11 +207,11 @@ def parse_script(script: str) -> List[Tuple[str, Dict[str, Any]]]:
             continue
         cmd = tokens[0].lower()
         if cmd not in ('balance', 'rewrite', 'refactor', 'fraig', 'dc',
-                       'bidec', 'bdd', 'resub'):
+                       'bidec', 'bdd', 'resub', 'sweep'):
             raise ValueError(
                 f"Unknown synthesis command '{tokens[0]}'. "
                 f"Supported: balance, rewrite, refactor, fraig, dc, "
-                f"bidec, bdd, resub"
+                f"bidec, bdd, resub, sweep"
             )
         kwargs: Dict[str, Any] = {}
         i = 1
@@ -256,9 +262,9 @@ def parse_script(script: str) -> List[Tuple[str, Dict[str, Any]]]:
                     )
                 val = int(tokens[i + 1])
                 if tok == '-r':
-                    if cmd not in ('rewrite', 'refactor', 'dc', 'bidec', 'resub'):
+                    if cmd not in ('rewrite', 'refactor', 'dc', 'bidec', 'resub', 'sweep'):
                         raise ValueError(f"Flag -r is only valid for 'rewrite', "
-                                         f"'refactor', 'dc', 'bidec', or 'resub'")
+                                         f"'refactor', 'dc', 'bidec', 'resub', or 'sweep'")
                     kwargs['rounds'] = val
                 elif tok == '-K':
                     if cmd == 'bdd':
@@ -281,13 +287,16 @@ def parse_script(script: str) -> List[Tuple[str, Dict[str, Any]]]:
                         raise ValueError(f"Flag -M is only valid for 'resub'")
                     kwargs['max_m'] = val
                 elif tok == '-D':
-                    if cmd != 'resub':
-                        raise ValueError(f"Flag -D is only valid for 'resub'")
-                    kwargs['max_divisors'] = val
+                    if cmd == 'sweep':
+                        kwargs['n_sim_patterns'] = val
+                    elif cmd == 'resub':
+                        kwargs['max_divisors'] = val
+                    else:
+                        raise ValueError(f"Flag -D is only valid for 'resub' or 'sweep'")
                 elif tok == '-T':
-                    if cmd != 'dc':
-                        raise ValueError(f"Flag -T is only valid for 'dc'")
-                    kwargs['timeout_ms'] = val
+                    if cmd not in ('dc', 'sweep'):
+                        raise ValueError(f"Flag -T is only valid for 'dc' or 'sweep'")
+                    kwargs['verify_timeout_ms' if cmd == 'sweep' else 'timeout_ms'] = val
                 elif tok == '-W':
                     if cmd != 'dc':
                         raise ValueError(f"Flag -W is only valid for 'dc'")
@@ -399,6 +408,12 @@ def run_script(
         elif cmd == 'resub':
             from .synthesis.sat_resub import resub_aig
             aig, out_lits = resub_aig(aig, out_lits, **kwargs)
+            if verbose:
+                print(f"      nodes: {n_before} -> {aig.n_nodes}")
+
+        elif cmd == 'sweep':
+            from .synthesis.sat_sweep import sat_sweep
+            aig, out_lits = sat_sweep(aig, out_lits, **kwargs)
             if verbose:
                 print(f"      nodes: {n_before} -> {aig.n_nodes}")
 

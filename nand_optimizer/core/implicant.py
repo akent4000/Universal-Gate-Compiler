@@ -19,12 +19,41 @@ Utilities:
 
 from __future__ import annotations
 from collections import defaultdict
-from typing import Dict, List, Set, Tuple
+from typing import Dict, FrozenSet, List, Set, Tuple
 
 from .expr import Expr, Lit, And, Or, ZERO, ONE
 
 
 DASH = -1  # wildcard / don't-care position in a ternary cube
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  QMC memoization
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `quine_mccluskey()` is the single most-called espresso primitive — on the
+# `mult4` profile it fires 4 698 times because Ashenhurst-Curtis bake-off
+# rebuilds the chart for every bipartition probe AND for every (h_i, g)
+# subproblem after a successful split. Most of those calls reuse the same
+# (on-set, dc-set, n_vars) triple. We hash on the unordered cube covers
+# (frozensets) so callers don't have to canonicalise their inputs.
+#
+# `Implicant` is effectively immutable (all `__slots__` are write-once in
+# `__init__` / `_from_masks`), so handing the same object to multiple callers
+# is safe; we still return a fresh list so callers may freely sort/extend it.
+
+_QMC_CacheKey = Tuple[FrozenSet[Tuple[int, ...]], FrozenSet[Tuple[int, ...]], int]
+_QMC_CACHE: Dict[_QMC_CacheKey, Tuple['Implicant', ...]] = {}
+_QMC_CACHE_MAX = 8192   # safety cap; per-circuit working set is far smaller
+
+
+def _qmc_cache_clear() -> None:
+    """Drop every cached prime-implicant list. Test helper."""
+    _QMC_CACHE.clear()
+
+
+def _qmc_cache_size() -> int:
+    return len(_QMC_CACHE)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -203,12 +232,23 @@ def quine_mccluskey(
     in exactly one non-DASH bit; that bit becomes DASH in the merged cube.
     Grouping by "count of explicit 1-bits" ensures all valid pairs are tried
     in adjacent groups (changing one 0→1 shifts ones_count by exactly 1).
+
+    Result is memoised on the unordered (on, dc, n_vars) triple — see the
+    cache notes at the top of this module.
     """
+    on_key = frozenset(on_cubes)
+    dc_key = frozenset(dc_cubes)
+    cache_key: _QMC_CacheKey = (on_key, dc_key, n_vars)
+    cached = _QMC_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
+
     all_cubes: Dict[Tuple[int, ...], Implicant] = {}
     for c in on_cubes + dc_cubes:
         all_cubes[c] = Implicant(c)
 
     if not all_cubes:
+        _QMC_CACHE[cache_key] = ()
         return []
 
     current = dict(all_cubes)
@@ -240,7 +280,14 @@ def quine_mccluskey(
 
         current = next_level
 
-    return sorted(primes.values(), key=lambda p: p.bits)
+    result = sorted(primes.values(), key=lambda p: p.bits)
+
+    if len(_QMC_CACHE) >= _QMC_CACHE_MAX:
+        # FIFO eviction — the cache mostly fills inside one optimize() call,
+        # so dropping the oldest entry rarely throws away a hot one.
+        _QMC_CACHE.pop(next(iter(_QMC_CACHE)))
+    _QMC_CACHE[cache_key] = tuple(result)
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

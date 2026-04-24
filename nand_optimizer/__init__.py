@@ -77,6 +77,7 @@ else:
                                           implicants_to_aig)
     from .synthesis.rewrite          import rewrite_aig, enumerate_cuts, evaluate_cut_tt
     from .synthesis.fraig            import fraig, fraig_stats
+    from .synthesis.sat_sweep        import sat_sweep
     from .synthesis.dont_care        import dc_optimize, dc_stats
     from .synthesis.balance          import balance_aig, aig_depth
     from .analysis.sta               import STAResult, TimingEntry, sta_aig, sta_nand, compute_sta
@@ -125,6 +126,7 @@ else:
         # AIG rewriting + exact synthesis
         'rewrite_aig', 'enumerate_cuts', 'evaluate_cut_tt',
         'fraig', 'fraig_stats',
+        'sat_sweep',
         'dc_optimize', 'dc_stats',
         'balance_aig', 'aig_depth',
         'STAResult', 'TimingEntry', 'sta_aig', 'sta_nand', 'compute_sta',

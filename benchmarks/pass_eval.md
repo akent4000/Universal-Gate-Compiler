@@ -15,6 +15,7 @@ Decisions follow the ROADMAP P2#7 criteria:
 | `XAG (-x)`        | 11 EPFL    | **−4.3%**   | **+2.0%**     | 3 / 8 / 0 | **production-ready, opt-in via `-x`; clear wins on XOR-heavy arithmetic** |
 | `+bdd`            | 7 EPFL     | +0.8%       | +49.7%        | 0 / 5 / 2 | **experimental**; no measurable area win, ~50% time overhead |
 | `+resub`          | 3 EPFL     | −6.1%       | +46 056.6%    | 2 / 0 / 1 | **experimental**; large wins on small circuits only, prohibitive wall-time |
+| `+sweep`          | 11 EPFL    | −0.7%       | +200.7%       | 2 / 9 / 0 | **production-ready, opt-in via `sweep` proc; only pass that beats FRAIG on adder (−6.4%)** |
 | `bandit (h=20)`   | 7 EPFL     | **−15.4%**  | +3 966.2%     | 5 / 2 / 0 | **best QoR mode**; ~40× wall-time, no regressions, designed for batch exploration |
 
 ---
@@ -152,12 +153,79 @@ combined `XAG ∪ bandit` benefit on arithmetic.
 
 ---
 
+## 5. `+sweep` — SAT sweeping (ODC-aware FRAIG superset)
+
+Script form: `rewrite; fraig; sweep; rewrite; balance`. Implementation:
+[`synthesis/sat_sweep.py`](../nand_optimizer/synthesis/sat_sweep.py)
+(ROADMAP P3#10). Two candidate buckets feed a Z3 miter:
+1. **Standard** — canonical full-simulation signature (the FRAIG bucket),
+   minus globally-unobservable nodes.
+2. **Fill-based (ODC)** — canonical signature with ~care bits set to 1;
+   groups nodes that agree on all *observable* simulation patterns but may
+   differ elsewhere — the opportunity FRAIG cannot see.
+
+Each candidate pair `(rep, m)` is verified by the symbolic-obs miter
+`∃ x : obs_m(x) ∧ (f_rep(x) ≠ f_m(x))`; UNSAT → safe to merge `m` into
+`rep`. The observability condition is built by reverse-topological
+traversal over AND/XOR nodes (Mishchenko et al., FPGA 2009 §3).
+
+### vs `baseline` (full default subset, 11 circuits)
+
+| benchmark | n_inputs | baseline_area | with_pass_area |  Δarea |  Δtime |
+|-----------|---------:|--------------:|---------------:|-------:|-------:|
+| random_control/ctrl       |   7 |  166 |  166 | +0.0% | +102.9% |
+| random_control/router     |  60 |  629 |  629 | +0.0% |  +44.0% |
+| random_control/int2float  |  11 |  276 |  276 | +0.0% | +239.8% |
+| random_control/dec        |   8 |  304 |  304 | +0.0% |  +39.6% |
+| random_control/cavlc      |  10 |  740 |  740 | +0.0% |  +89.1% |
+| random_control/priority   | 128 | 1019 | 1019 | +0.0% | +196.4% |
+| arithmetic/adder          | 256 | 1020 |  955 | **−6.4%** | +344.4% |
+| random_control/i2c        | 147 | 1550 | 1538 |  −0.8% | +111.4% |
+| arithmetic/max            | 512 | 3079 | 3079 | +0.0% | +287.1% |
+| arithmetic/bar            | 135 | 3206 | 3206 | +0.0% |  +64.5% |
+| arithmetic/sin            |  24 | 7166 | 7158 |  −0.1% | +688.9% |
+
+**Class breakdown:**
+- **XOR-heavy arithmetic where FRAIG has nothing left** — adder is the
+  killer app. After `rewrite; fraig; rewrite; balance` the AIG is at 1020
+  ANDs and FRAIG cannot find further global equivalences; `sweep` adds
+  −6.4% (1020 → 955). The fill-based bucket discovers nodes that agree
+  on every pattern where any output cares, but differ on don't-care
+  patterns — these are invisible to vanilla FRAIG.
+- **Reconvergent control with residual ODC** — i2c −0.8%, sin −0.1%.
+- **Already-saturated circuits** — 8/11 ties. Both buckets find no new
+  pairs the existing `rewrite; fraig` chain hasn't already settled.
+- **Zero regressions** across the full subset.
+
+**vs the existing ODC pass (`dc --odc --odc-mode z3-exact`).** `sweep`
+and `dc-z3-exact` are **complementary, not redundant**: `dc-z3-exact`
+operates on local cuts and wins big on control logic with reconvergent
+fanout (`ctrl −20.5%`, `priority −20.3%`); `sweep` operates globally on
+node equivalences modulo observability and wins on arithmetic where
+local DC-based rewriting saturates (adder `dc-z3 → 1013`, `sweep → 955`).
+Composed, `rewrite; fraig; dc --odc --odc-mode z3-exact; sweep; rewrite;
+balance` gets adder to 952 (best of any pass combination tested).
+
+**Why `sweep` and not `fraig --odc`.** The decision (ROADMAP P3#10
+"Что осталось") is to keep them as separate procs. `fraig` stays the
+fast, FRAIG-classic pass everyone composes; `sweep` is the heavier
+ODC-aware superset, opt-in for users who can spend ~3× wall-time on
+the residual gain. Merging the two would force the obs-builder cost
+on every default-script run, which the data does not justify.
+
+**Wall-time.** Mean +200.7% (~3× baseline) is dominated by `sin`
+(+689%, single circuit at 5416 ANDs takes 9 min vs 70 s baseline).
+On the rest of the subset the multiplier is 1.4–4.4×, acceptable for
+a once-per-batch synthesis pass.
+
+---
+
 ## Reproducing
 
 ```bash
 # Full subset, all variants except resub (resub timing is prohibitive)
 python3 benchmarks/run_pass_eval.py \
-    --variants "baseline,XAG (-x),+bdd,bandit (h=20)" \
+    --variants "baseline,XAG (-x),+bdd,+sweep,bandit (h=20)" \
     --out benchmarks/pass_eval.md
 
 # Quick smoke (3 smallest circuits)
@@ -168,4 +236,9 @@ python3 benchmarks/run_pass_eval.py \
     --subset "random_control/ctrl,random_control/router,arithmetic/adder" \
     --variants "baseline,+resub" \
     --out /tmp/pass_eval_resub.md
+
+# Sweep eval on full subset
+python3 benchmarks/run_pass_eval.py \
+    --variants "baseline,+sweep" \
+    --out /tmp/pass_eval_sweep.md
 ```

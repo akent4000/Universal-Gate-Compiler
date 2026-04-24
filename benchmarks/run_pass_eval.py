@@ -67,6 +67,7 @@ PASS_VARIANTS: Dict[str, str] = {
     'XAG (-x)':       'rewrite -x; fraig; rewrite -x; balance',
     '+bdd':           'bdd; rewrite; fraig; rewrite; balance',
     '+resub':         'rewrite; fraig; resub; rewrite; balance',
+    '+sweep':         'rewrite; fraig; sweep; rewrite; balance',
     'bandit (h=20)':  BANDIT_SENTINEL,
 }
 
