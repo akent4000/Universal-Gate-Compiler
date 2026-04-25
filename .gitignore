@@ -218,3 +218,4 @@ nand_optimizer/xag_db_4.pkl
 
 # cProfile dumps (machine-specific; regenerate via perf_baseline.md command)
 benchmarks/*.out
+report_lab2/

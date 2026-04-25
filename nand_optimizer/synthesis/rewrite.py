@@ -335,6 +335,18 @@ def _apply_template(
 #  Main rewriter
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _choice_siblings(aig: AIG, node_id: int) -> List[int]:
+    """
+    Return all node IDs in the same choice class as ``node_id`` (including
+    itself). Empty-chain case — node_id has no chain membership — returns
+    just [node_id].
+    """
+    if not aig._choice_next:
+        return [node_id]
+    head = aig.choice_rep(node_id)
+    return aig.choice_class(head)
+
+
 def rewrite_aig(
     old_aig:          AIG,
     out_lits:         Optional[List[int]]  = None,
@@ -344,6 +356,7 @@ def rewrite_aig(
     exact_max_gates:  int                  = 6,
     exact_timeout_ms: int                  = 2000,
     use_xag:          bool                 = False,
+    use_choices:      bool                 = False,
 ) -> Tuple[AIG, List[int]]:
     """
     Fanout-aware rewriting pass.
@@ -408,16 +421,37 @@ def rewrite_aig(
             best_choice: Optional[Tuple[int, List[int], int, List[Tuple[int, int]]]] = None
             best_net = base_cost          # net new-NAND count (lower is better)
 
-            for cut in cuts[old_id]:
-                if len(cut) <= 1:
-                    continue
-                if len(cut) > cut_size:
-                    continue
-                if old_id in cut:
-                    # trivial self-cut is useless
-                    continue
+            # Structural choices (ROADMAP P3#9): enumerate cuts rooted at any
+            # choice-equivalent of old_id. The TT is the same (same function
+            # by choice-chain invariant), but the cut variables differ — a
+            # poor-matching cut at old_id may have a better-matching sibling.
+            # We only consider siblings whose cuts have all leaves already
+            # translated into new_aig (i.e., leaf node IDs < old_id), since
+            # anything past old_id hasn't been processed yet in this sweep.
+            if use_choices:
+                roots = _choice_siblings(current_aig, old_id)
+            else:
+                roots = [old_id]
 
-                tt, ordered_cut = evaluate_cut_tt(current_aig, old_id, cut)
+            candidate_cuts: List[Tuple[int, Set[int]]] = []
+            for root in roots:
+                for cut in cuts[root]:
+                    if len(cut) <= 1:
+                        continue
+                    if len(cut) > cut_size:
+                        continue
+                    if root in cut:
+                        continue
+                    if root != old_id:
+                        # Skip cuts whose leaves haven't been translated yet.
+                        # Any leaf ≥ old_id either IS old_id (circular) or is
+                        # topologically later in this sweep (not in lit_map).
+                        if any(c >= old_id for c in cut):
+                            continue
+                    candidate_cuts.append((root, cut))
+
+            for root, cut in candidate_cuts:
+                tt, ordered_cut = evaluate_cut_tt(current_aig, root, cut)
                 k              = len(ordered_cut)
 
                 # Collect candidate templates: AIG_DB_4 (AND-only) and XAG_DB_4

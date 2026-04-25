@@ -26,6 +26,7 @@ StateTable / KISS2 FSM ─────────────┤ (excitation lo
     ├─[7.3] Bi-Decomposition             — disjoint-support AND/OR/XOR split (k=5..8)
     ├─[7.4] BDD-guided Rebuild          — per-output ROBDD + sifting reorder
     ├─[7.5] FRAIGing                    — simulation + SAT equivalence merging
+    ├─[7.55] Structural Choice Nodes    — multi-variant AIG with choice chains (ABC compress2rs-style)
     ├─[7.6] SAT Resubstitution          — functional dependency test for k=5..7 cuts
     ├─[7.7] Don't-Care Optimization     — SDC + sim-based ODC (Mishchenko 2009)
     │        ├─ DC-aware NPN lookup     — care-mask padding into AIG_DB_4
@@ -226,6 +227,12 @@ python -m nand_optimizer mult4 --script "rewrite; fraig; dc -r 3 --dc-exact --od
 # XAG templates (AND+XOR) — recommended for arithmetic with XOR structure
 # (adder −24.7%, sin −5.1% on EPFL; see benchmarks/pass_eval.md)
 python -m nand_optimizer epfl --subset arithmetic/adder --script "rewrite -x; fraig; rewrite -x; balance"
+
+# Structural choice nodes (ABC compress2rs-style): build a multi-variant AIG
+# first, then run rewrite/fraig/balance with choice-aware cut matching. The
+# `choice` pass runs each variant script on a fresh copy, merges them into
+# one graph and SAT-verifies cross-variant equivalences.
+python -m nand_optimizer epfl --subset random_control/router --script "choice; rewrite -c; fraig; rewrite -c; balance"
 ```
 
 ### Supported commands
@@ -241,6 +248,7 @@ python -m nand_optimizer epfl --subset arithmetic/adder --script "rewrite -x; fr
 | `bdd`      | Per-output ROBDD rebuild + sifting reorder + ITE realisation (requires `dd`) — **experimental** (no measurable area win on EPFL subset; mean Δarea +0.8%, see [pass_eval.md](benchmarks/pass_eval.md)) |
 | `resub`    | SAT-style functional resubstitution with up to 3 divisors for wide cuts (k=5..7) — **experimental** (mean Δarea −6.1% on small circuits but ~460× wall-time; see [pass_eval.md](benchmarks/pass_eval.md)) |
 | `sweep`    | SAT sweeping — ODC-aware FRAIG superset; merges nodes equivalent modulo observability via symbolic obs-builder + Z3 miter (Mishchenko 2009 §3). Beats FRAIG on adder (−6.4%), 0 regressions on 11 EPFL; ~3× wall-time (see [pass_eval.md §5](benchmarks/pass_eval.md)) |
+| `choice`   | Structural choice nodes (ABC `compress2rs`-style, Mishchenko DAC 2006). Runs several variant scripts on copies of the AIG, merges them into one graph, and SAT-verifies cross-variant equivalences before linking them via `AIG.add_choice`. The follow-up `rewrite -c` enumerates cuts at any choice alternative, so a cut with no template match at the original node may match at a structural sibling. See [ROADMAP.md](ROADMAP.md) P3#9 |
 
 ### Flags for `rewrite` / `refactor`
 
@@ -248,6 +256,7 @@ python -m nand_optimizer epfl --subset arithmetic/adder --script "rewrite -x; fr
 |---|---|---|
 | `-z` | Use exact (SAT-based) synthesis per cut | off |
 | `-x` | Enable XAG_DB_4 templates (AND+XOR); NAND-cost-aware comparator | off |
+| `-c` | Enumerate cuts at choice alternatives (requires a prior `choice` pass) | off |
 | `-r N` | Number of rewriting rounds | 1 |
 | `-K N` | Cut size (max leaves per cut) | 4 |
 
@@ -282,6 +291,8 @@ python -m nand_optimizer epfl --subset arithmetic/adder --script "rewrite -x; fr
 | `sweep` | `-D N`          | Simulation word width (patterns) | 256 |
 | `sweep` | `-r N`          | Rounds | 2 |
 | `sweep` | `-T N`          | Z3 timeout per pair, ms | 2000 |
+| `choice` | `-D N`         | Simulation word width (patterns used to form candidate equivalence classes) | 256 |
+| `choice` | `-s STR`       | Pipe-separated variant scripts; `,` within a variant is treated as `;`. Default `"\|balance\|rewrite\|rewrite,fraig"` | — |
 
 ### Python API
 

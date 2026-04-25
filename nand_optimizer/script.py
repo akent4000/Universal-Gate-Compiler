@@ -64,6 +64,17 @@ sweep [-D N] [-r N] [-T N]
                        -D N   simulation word width, patterns (default 256)
                        -r N   rounds                          (default 2)
                        -T N   Z3 timeout per pair, ms         (default 2000)
+choice [-D N] [-s "s1|s2|..."]
+                     Build structural-choice AIG (ABC compress2rs-style):
+                     run several synthesis scripts in parallel, merge the
+                     resulting AIGs, and link functionally-equivalent nodes
+                     from different variants via choice chains so that the
+                     next ``rewrite -c`` can root cuts at any alternative.
+                       -D N   simulation word width          (default 256)
+                       -s STR pipe-separated variant scripts
+                              (default: "" | "balance" | "rewrite" |
+                              "rewrite; fraig")
+rewrite -c           additional flag: enumerate cuts at choice alternatives
 
 Bandit-guided search
 --------------------
@@ -207,11 +218,11 @@ def parse_script(script: str) -> List[Tuple[str, Dict[str, Any]]]:
             continue
         cmd = tokens[0].lower()
         if cmd not in ('balance', 'rewrite', 'refactor', 'fraig', 'dc',
-                       'bidec', 'bdd', 'resub', 'sweep'):
+                       'bidec', 'bdd', 'resub', 'sweep', 'choice'):
             raise ValueError(
                 f"Unknown synthesis command '{tokens[0]}'. "
                 f"Supported: balance, rewrite, refactor, fraig, dc, "
-                f"bidec, bdd, resub, sweep"
+                f"bidec, bdd, resub, sweep, choice"
             )
         kwargs: Dict[str, Any] = {}
         i = 1
@@ -221,6 +232,21 @@ def parse_script(script: str) -> List[Tuple[str, Dict[str, Any]]]:
                 kwargs['use_exact'] = True
             elif tok == '-x' and cmd in ('rewrite', 'refactor'):
                 kwargs['use_xag'] = True
+            elif tok == '-c' and cmd in ('rewrite', 'refactor'):
+                kwargs['use_choices'] = True
+            elif tok == '-s' and cmd == 'choice':
+                if i + 1 >= len(tokens):
+                    raise ValueError("-s requires a pipe-separated script argument")
+                # The outer parser splits on whitespace and ';', so the
+                # variant-script argument must be a single whitespace-free
+                # token. Use '|' to separate variants, ',' inside a variant
+                # in place of ';'. Example:
+                #     choice -s "|balance|rewrite|rewrite,fraig"
+                raw = tokens[i + 1]
+                kwargs['scripts'] = [
+                    s.strip().replace(',', '; ') for s in raw.split('|')
+                ]
+                i += 1
             elif tok == '--no-sdc' and cmd == 'dc':
                 kwargs['use_sdc'] = False
             elif tok == '--odc' and cmd == 'dc':
@@ -289,10 +315,14 @@ def parse_script(script: str) -> List[Tuple[str, Dict[str, Any]]]:
                 elif tok == '-D':
                     if cmd == 'sweep':
                         kwargs['n_sim_patterns'] = val
+                    elif cmd == 'choice':
+                        kwargs['n_sim_patterns'] = val
                     elif cmd == 'resub':
                         kwargs['max_divisors'] = val
                     else:
-                        raise ValueError(f"Flag -D is only valid for 'resub' or 'sweep'")
+                        raise ValueError(
+                            f"Flag -D is only valid for 'resub', 'sweep', or 'choice'"
+                        )
                 elif tok == '-T':
                     if cmd not in ('dc', 'sweep'):
                         raise ValueError(f"Flag -T is only valid for 'dc' or 'sweep'")
@@ -321,6 +351,8 @@ def _fmt_flags(kwargs: Dict[str, Any]) -> str:
         parts.append('-z')
     if kwargs.get('use_xag'):
         parts.append('-x')
+    if kwargs.get('use_choices'):
+        parts.append('-c')
     if kwargs.get('use_sdc') is False:
         parts.append('--no-sdc')
     if kwargs.get('use_odc') is True:
@@ -416,6 +448,15 @@ def run_script(
             aig, out_lits = sat_sweep(aig, out_lits, **kwargs)
             if verbose:
                 print(f"      nodes: {n_before} -> {aig.n_nodes}")
+
+        elif cmd == 'choice':
+            from .synthesis.choice import build_choices
+            aig, out_lits, n_links = build_choices(
+                aig, out_lits, verbose=verbose, **kwargs,
+            )
+            if verbose:
+                print(f"      nodes: {n_before} -> {aig.n_nodes}  "
+                      f"(choice links: {n_links})")
 
     return aig, out_lits
 
